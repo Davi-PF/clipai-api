@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import Settings, get_settings
 from app.core.database import dispose_engine
 from app.core.exceptions import register_exception_handlers
+from app.routers.analytics import router as analytics_router
 from app.routers.auth import router as auth_router
 from app.routers.clips import router as clips_router
 from app.routers.collections import router as collections_router
@@ -61,6 +62,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(tags_router, prefix=resolved_settings.api_v1_prefix)
     application.include_router(clips_router, prefix=resolved_settings.api_v1_prefix)
     application.include_router(collections_router, prefix=resolved_settings.api_v1_prefix)
+    application.include_router(analytics_router, prefix=resolved_settings.api_v1_prefix)
 
     return application
 
