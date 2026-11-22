@@ -13,6 +13,7 @@ Antes de criar, alterar ou refatorar qualquer arquivo de código, migration ou t
 3. [`docs/API_CONTRACT.md`](docs/API_CONTRACT.md): Contrato REST (`/api/v1/...`), payloads JSON de request/response, códigos HTTP, formato padronizado de erro e fluxo de upload via Presigned URL.
 4. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): Arquitetura em camadas (`routers`, `services`, `repositories`, `models`, `schemas`, `core`), árvore de diretórios, variáveis de ambiente e pipeline CI/CD.
 5. [`docs/SECURITY.md`](docs/SECURITY.md): Argon2id, JWT + Refresh Token rotativo em cookie `HttpOnly`, CORS, proteção do Cloudflare R2, rate limiting e plano técnico do 2FA TOTP.
+6. [`docs/GIT_WORKFLOW.md`](docs/GIT_WORKFLOW.md): Fluxo de branches (GitHub Flow), nomenclatura de branches, política de commits atômicos e estratégia de Pull Requests.
 
 ### Sincronização de Contratos
 - **NUNCA** implemente um endpoint, altere um payload JSON ou modifique uma coluna do banco sem que a mudança esteja refletida em `docs/API_CONTRACT.md` e `docs/DATABASE.md`. O frontend (`clipai-web`) depende diretamente de `docs/API_CONTRACT.md`.
@@ -93,3 +94,15 @@ Nenhuma tarefa de implementação é considerada concluída sem seus respectivos
    ruff format --check .
    pytest --cov=app --cov-fail-under=80
    ```
+
+---
+
+## 7. Git & Branching Protocol
+
+Todo agente de código deve seguir rigorosamente as diretrizes de [`docs/GIT_WORKFLOW.md`](docs/GIT_WORKFLOW.md):
+
+1. **Consultar `docs/GIT_WORKFLOW.md`:** Leia o fluxo oficial de branches, escopos de commit e regras de PR antes de iniciar qualquer entrega.
+2. **Nunca Commitar na `main`:** É estritamente proibido editar, commitar ou fazer push diretamente na branch `main`. Antes de modificar qualquer arquivo, verifique a branch atual (`git branch --show-current`) e crie uma branch adequada a partir da `main` (ex.: `feat/<short-name>`, `fix/<short-name>`, `docs/<short-name>`).
+3. **Validar Antes de Commitar:** Sempre execute `ruff check .`, `ruff format --check .` e `pytest` com sucesso antes de criar qualquer commit.
+4. **Commits Atômicos Obrigatórios:** Organize as alterações em commits pequenos, coesos e lógicos via `git add <arquivos>` seletivo, seguindo *Conventional Commits* em inglês (`<type>(<scope>): <imperative description>`, máx. 72 caracteres).
+
