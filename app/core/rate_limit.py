@@ -6,6 +6,7 @@ import math
 import time
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
+from uuid import UUID
 
 from fastapi import Request, status
 
@@ -101,3 +102,18 @@ def rate_limit(
         )
 
     return _dependency
+
+
+async def check_user_rate_limit(
+    *,
+    scope: str,
+    user_id: UUID,
+    max_requests: int,
+    window_seconds: int,
+) -> None:
+    """Enforce sliding-window rate limit keyed by authenticated user ID."""
+    await rate_limiter.check(
+        f"{scope}:{user_id}",
+        max_requests=max_requests,
+        window_seconds=window_seconds,
+    )
