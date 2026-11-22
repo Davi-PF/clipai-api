@@ -32,6 +32,8 @@ erDiagram
 
     clips ||--o{ clip_likes : "recebe"
     clips ||--o{ clip_favorites : "recebe"
+    clips ||--o{ clip_watch_sessions : "gera"
+    users ||--o{ clip_watch_sessions : "assiste"
 
     users {
         uuid id PK
@@ -140,6 +142,19 @@ erDiagram
         uuid user_id PK, FK
         uuid clip_id PK, FK
         timestamptz created_at
+    }
+
+    clip_watch_sessions {
+        uuid id PK
+        uuid clip_id FK
+        uuid viewer_id FK
+        varchar session_token UK
+        float watched_seconds
+        smallint max_progress_pct
+        jsonb reached_buckets
+        boolean completed
+        timestamptz created_at
+        timestamptz updated_at
     }
 ```
 
@@ -311,6 +326,24 @@ Registro relacional de clipes favoritados (salvos) pelos usuários.
 
 ---
 
+### 3.11. `clip_watch_sessions`
+Armazena sessões de visualização e checkpoints de retenção de vídeo (0% a 100%, em múltiplos de 10%) para o **Estúdio do Criador**.
+
+| Coluna | Tipo PostgreSQL | Nulo? | Default | Constraints / Observações |
+| :--- | :--- | :---: | :--- | :--- |
+| `id` | `UUID` | Não | `gen_random_uuid()` | `PRIMARY KEY` |
+| `clip_id` | `UUID` | Não | — | `FOREIGN KEY REFERENCES clips(id) ON DELETE CASCADE` |
+| `viewer_id` | `UUID` | Sim | `NULL` | `FOREIGN KEY REFERENCES users(id) ON DELETE SET NULL` |
+| `session_token` | `VARCHAR(64)` | Não | — | UUID gerado pelo cliente; `UNIQUE (clip_id, session_token)` (`uq_clip_watch_sessions_clip_session`) |
+| `watched_seconds` | `DOUBLE PRECISION` | Não | `0` | `CHECK (watched_seconds >= 0)` — tempo efetivamente assistido (limitado a `duration * 3`) |
+| `max_progress_pct` | `SMALLINT` | Não | `0` | `CHECK (max_progress_pct >= 0 AND max_progress_pct <= 100)` |
+| `reached_buckets` | `JSONB` | Não | `'[]'::jsonb` | Lista ordenada de faixas alcançadas em `[0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]` |
+| `completed` | `BOOLEAN` | Não | `false` | `true` quando `max_progress_pct >= 90` |
+| `created_at` | `TIMESTAMPTZ` | Não | `now()` | Timestamp de início da sessão |
+| `updated_at` | `TIMESTAMPTZ` | Não | `now()` | Timestamp do último checkpoint recebido |
+
+---
+
 ## 4. Schema do Campo `technical_metadata` (`JSONB`)
 
 A coluna `clips.technical_metadata` armazena propriedades de codificação e resolução extraídas do vídeo no cliente (e extensíveis no Pós-MVP com dados de transcodificação HLS/FFprobe). O payload é validado via Pydantic v2 (`TechnicalMetadataSchema`) antes de ser persistido.
@@ -394,4 +427,9 @@ CREATE INDEX ix_collection_clips_order ON collection_clips (collection_id, posit
 CREATE INDEX ix_clip_likes_clip_id ON clip_likes (clip_id);
 CREATE INDEX ix_clip_favorites_user_created ON clip_favorites (user_id, created_at DESC);
 CREATE INDEX ix_collections_user_privacy ON collections (user_id, privacy, created_at DESC);
+
+-- 7. Telemetria de Retenção (clip_watch_sessions): agregações por clipe e período
+CREATE INDEX ix_clip_watch_sessions_clip_id ON clip_watch_sessions (clip_id);
+CREATE INDEX ix_clip_watch_sessions_clip_created ON clip_watch_sessions (clip_id, created_at);
+CREATE INDEX ix_clip_watch_sessions_viewer_id ON clip_watch_sessions (viewer_id);
 ```
