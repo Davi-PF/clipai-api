@@ -3,7 +3,8 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, Text, func, text
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, String, func, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -17,6 +18,11 @@ class User(TimestampMixin, Base):
     __table_args__ = (
         Index("ix_users_lower_email", text("LOWER(email)"), unique=True),
         Index("ix_users_lower_username", text("LOWER(username)"), unique=True),
+        Index("ix_users_discord_id", "discord_id", unique=True),
+        CheckConstraint(
+            "avatar_source IN ('custom', 'discord', 'none')",
+            name="avatar_source_valid",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(
@@ -27,10 +33,17 @@ class User(TimestampMixin, Base):
     )
     username: Mapped[str] = mapped_column(String(30), nullable=False)
     email: Mapped[str] = mapped_column(String(255), nullable=False)
-    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    display_name: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    display_name: Mapped[str | None] = mapped_column(String(50), nullable=True)
     avatar_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    bio: Mapped[str | None] = mapped_column(Text, nullable=True)
+    avatar_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    avatar_source: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="none",
+        server_default=text("'none'"),
+    )
+    bio: Mapped[str | None] = mapped_column(String(240), nullable=True)
     is_email_verified: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
@@ -43,7 +56,15 @@ class User(TimestampMixin, Base):
         default=True,
         server_default=text("true"),
     )
-    # Reserved for v1.1 (2FA TOTP)
+    # Discord OAuth2 integration
+    discord_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    discord_username: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    discord_avatar_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    discord_linked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    # 2FA TOTP (PyOTP + Fernet)
     is_2fa_enabled: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
@@ -51,11 +72,32 @@ class User(TimestampMixin, Base):
         server_default=text("false"),
     )
     totp_secret_encrypted: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    totp_backup_codes: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
 
     refresh_tokens: Mapped[list["RefreshToken"]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
     )
+
+    @property
+    def hashed_password(self) -> str | None:
+        """Return stored Argon2id password hash (or None for Discord-only accounts)."""
+        return self.password_hash
+
+    @hashed_password.setter
+    def hashed_password(self, value: str | None) -> None:
+        """Assign Argon2id password hash."""
+        self.password_hash = value
+
+    @property
+    def has_password(self) -> bool:
+        """Return True when the account has a local password configured."""
+        return bool(self.password_hash)
+
+    @property
+    def discord_linked(self) -> bool:
+        """Return True when a Discord account is linked to this user."""
+        return bool(self.discord_id)
 
 
 class RefreshToken(Base):

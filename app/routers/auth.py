@@ -1,15 +1,19 @@
 """Authentication HTTP router (/api/v1/auth)."""
 
-from fastapi import APIRouter, Depends, Request, Response, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
 from app.core.database import get_db
-from app.core.dependencies import get_current_user
+from app.core.dependencies import get_current_user, get_optional_user
 from app.core.exceptions import AppError
 from app.core.rate_limit import rate_limit
 from app.models.user import User
 from app.schemas.auth import (
+    DiscordAuthMode,
+    DiscordAuthUrlResponse,
+    DiscordCallbackRequest,
+    DiscordCallbackResponse,
     ForgotPasswordRequest,
     LoginRequest,
     LoginResponse,
@@ -19,10 +23,16 @@ from app.schemas.auth import (
     RegisterResponse,
     ResendVerificationRequest,
     ResetPasswordRequest,
+    TwoFactorDisableRequest,
+    TwoFactorEnableRequest,
+    TwoFactorEnableResponse,
+    TwoFactorSetupResponse,
+    TwoFactorVerifyLoginRequest,
     VerifyEmailRequest,
 )
 from app.schemas.user import UserMeResponse
 from app.services.auth_service import AuthService
+from app.services.discord_service import DiscordOAuthService
 from app.services.email_service import EmailService
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
@@ -33,13 +43,24 @@ def get_email_service(settings: Settings = Depends(get_settings)) -> EmailServic
     return EmailService(settings=settings)
 
 
+def get_discord_service(settings: Settings = Depends(get_settings)) -> DiscordOAuthService:
+    """Provide DiscordOAuthService dependency."""
+    return DiscordOAuthService(settings=settings)
+
+
 def get_auth_service(
     session: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
     email_service: EmailService = Depends(get_email_service),
+    discord_service: DiscordOAuthService = Depends(get_discord_service),
 ) -> AuthService:
     """Provide AuthService dependency."""
-    return AuthService(session=session, settings=settings, email_service=email_service)
+    return AuthService(
+        session=session,
+        settings=settings,
+        email_service=email_service,
+        discord_service=discord_service,
+    )
 
 
 def _refresh_cookie_path(settings: Settings) -> str:
@@ -150,7 +171,7 @@ async def resend_verification(
             )
         )
     ],
-    summary="Autentica usuário e define cookie HttpOnly de refresh token",
+    summary="Autentica usuário e define cookie HttpOnly de refresh token (ou desafio 2FA)",
 )
 async def login(
     payload: LoginRequest,
@@ -159,9 +180,97 @@ async def login(
     auth_service: AuthService = Depends(get_auth_service),
     settings: Settings = Depends(get_settings),
 ) -> LoginResponse:
-    """Authenticate user credentials and issue tokens."""
+    """Authenticate user credentials and issue tokens or 2FA challenge."""
     user_agent, ip_address = _extract_request_metadata(request)
     login_response, raw_refresh_token = await auth_service.login(
+        payload,
+        user_agent=user_agent,
+        ip_address=ip_address,
+    )
+    if raw_refresh_token is not None:
+        _set_refresh_cookie(response, raw_refresh_token, settings)
+    return login_response
+
+
+@router.post(
+    "/2fa/setup",
+    response_model=TwoFactorSetupResponse,
+    summary="Gera segredo Base32 criptografado com Fernet e URI otpauth para 2FA TOTP",
+)
+async def setup_two_factor(
+    current_user: User = Depends(get_current_user),
+    auth_service: AuthService = Depends(get_auth_service),
+) -> TwoFactorSetupResponse:
+    """Initialize 2FA TOTP configuration for the authenticated user."""
+    return await auth_service.setup_2fa(current_user)
+
+
+@router.post(
+    "/2fa/enable",
+    response_model=TwoFactorEnableResponse,
+    summary="Valida código TOTP de 6 dígitos, ativa o 2FA e gera 8 códigos de backup",
+)
+async def enable_two_factor(
+    payload: TwoFactorEnableRequest,
+    current_user: User = Depends(get_current_user),
+    auth_service: AuthService = Depends(get_auth_service),
+) -> TwoFactorEnableResponse:
+    """Confirm TOTP setup and activate 2FA with one-time backup codes."""
+    return await auth_service.enable_2fa(current_user, payload)
+
+
+@router.post(
+    "/2fa/disable",
+    response_model=MessageResponse,
+    summary="Valida senha atual e código TOTP/backup para desativar o 2FA",
+)
+async def disable_two_factor(
+    payload: TwoFactorDisableRequest,
+    current_user: User = Depends(get_current_user),
+    auth_service: AuthService = Depends(get_auth_service),
+) -> MessageResponse:
+    """Disable 2FA and purge stored TOTP secret and backup codes."""
+    return await auth_service.disable_2fa(current_user, payload)
+
+
+@router.post(
+    "/2fa/verify-login",
+    response_model=LoginResponse,
+    dependencies=[
+        Depends(
+            rate_limit(
+                scope="auth_2fa_verify",
+                max_requests=5,
+                window_seconds=60,
+            )
+        )
+    ],
+    summary="Valida desafio 2FA (TOTP ou código de backup) e emite sessão autenticada",
+)
+@router.post(
+    "/2fa/verify",
+    response_model=LoginResponse,
+    include_in_schema=False,
+    dependencies=[
+        Depends(
+            rate_limit(
+                scope="auth_2fa_verify",
+                max_requests=5,
+                window_seconds=60,
+            )
+        )
+    ],
+)
+async def verify_two_factor_login(
+    payload: TwoFactorVerifyLoginRequest,
+    request: Request,
+    response: Response,
+    auth_service: AuthService = Depends(get_auth_service),
+    settings: Settings = Depends(get_settings),
+) -> LoginResponse:
+    """Complete 2FA login challenge and issue access token + refresh cookie."""
+    user_agent, ip_address = _extract_request_metadata(request)
+    login_response, raw_refresh_token = await auth_service.verify_2fa_login(
         payload,
         user_agent=user_agent,
         ip_address=ip_address,
@@ -249,6 +358,55 @@ async def reset_password(
 ) -> MessageResponse:
     """Complete password reset flow."""
     return await auth_service.reset_password(payload)
+
+
+@router.get(
+    "/discord/url",
+    response_model=DiscordAuthUrlResponse,
+    summary="Gera URL oficial de autorização do Discord OAuth2 com state assinado",
+)
+async def get_discord_authorization_url(
+    mode: DiscordAuthMode = Query(default="login"),
+    current_user: User | None = Depends(get_optional_user),
+    auth_service: AuthService = Depends(get_auth_service),
+) -> DiscordAuthUrlResponse:
+    """Return Discord OAuth2 authorization URL for login or account linking."""
+    return auth_service.get_discord_auth_url(mode=mode, current_user=current_user)
+
+
+@router.post(
+    "/discord/callback",
+    response_model=DiscordCallbackResponse,
+    dependencies=[
+        Depends(
+            rate_limit(
+                scope="auth_discord_callback",
+                max_requests=10,
+                window_seconds=60,
+            )
+        )
+    ],
+    summary="Processa callback do Discord OAuth2 (login social ou vinculação de conta)",
+)
+async def handle_discord_callback(
+    payload: DiscordCallbackRequest,
+    request: Request,
+    response: Response,
+    current_user: User | None = Depends(get_optional_user),
+    auth_service: AuthService = Depends(get_auth_service),
+    settings: Settings = Depends(get_settings),
+) -> DiscordCallbackResponse:
+    """Exchange Discord OAuth2 code and authenticate or link user account."""
+    user_agent, ip_address = _extract_request_metadata(request)
+    callback_response, raw_refresh_token = await auth_service.handle_discord_callback(
+        payload,
+        current_user=current_user,
+        user_agent=user_agent,
+        ip_address=ip_address,
+    )
+    if raw_refresh_token is not None:
+        _set_refresh_cookie(response, raw_refresh_token, settings)
+    return callback_response
 
 
 @router.get(

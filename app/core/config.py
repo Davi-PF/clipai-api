@@ -50,9 +50,14 @@ class Settings(BaseSettings):
     refresh_cookie_samesite: Literal["lax", "strict"] = "lax"
     refresh_cookie_domain: str = ""
 
-    # 2FA TOTP (Reserved for v1.1)
+    # 2FA TOTP (Fernet symmetric encryption)
     totp_encryption_key: SecretStr | None = None
-    totp_issuer_name: str = "CLIPAI"
+    totp_issuer_name: str = "CLIPAÍ"
+
+    # Discord OAuth2
+    discord_client_id: str | None = None
+    discord_client_secret: SecretStr | None = None
+    discord_redirect_uri: str = "http://localhost:3000/auth/discord/callback"
 
     # Cloudflare R2 (S3 Compatible Storage)
     r2_account_id: str
@@ -69,6 +74,7 @@ class Settings(BaseSettings):
     max_video_size_bytes: int = Field(default=104_857_600, ge=1)
     max_video_duration_seconds: int = Field(default=120, ge=1)
     max_thumbnail_size_bytes: int = Field(default=5_242_880, ge=1)
+    max_avatar_size_bytes: int = Field(default=5_242_880, ge=1)
 
     # Resend (Transactional Email)
     resend_api_key: SecretStr | None = None

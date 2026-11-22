@@ -40,11 +40,18 @@ erDiagram
         varchar password_hash
         varchar display_name
         varchar avatar_url
-        text bio
+        varchar avatar_key
+        varchar avatar_source
+        varchar bio
+        varchar discord_id UK
+        varchar discord_username
+        varchar discord_avatar_url
+        timestamptz discord_linked_at
         boolean is_email_verified
         boolean is_active
         boolean is_2fa_enabled
         varchar totp_secret_encrypted
+        jsonb totp_backup_codes
         timestamptz created_at
         timestamptz updated_at
     }
@@ -141,27 +148,35 @@ erDiagram
 ## 3. Especificação das Tabelas
 
 ### 3.1. `users`
-Armazena as contas de usuários e credenciais de autenticação, incluindo as colunas já reservadas para o 2FA TOTP (v1.1).
+Armazena as contas de usuários, perfil customizado (avatar no R2), vínculo com Discord OAuth2 e credenciais de autenticação (incluindo 2FA TOTP e códigos de backup).
 
 | Coluna | Tipo PostgreSQL | Nulo? | Default | Constraints / Observações |
 | :--- | :--- | :---: | :--- | :--- |
 | `id` | `UUID` | Não | `gen_random_uuid()` | `PRIMARY KEY` |
 | `username` | `VARCHAR(30)` | Não | — | `UNIQUE` (índice `LOWER(username)`), `^[a-zA-Z0-9_]{3,30}$` |
 | `email` | `VARCHAR(255)` | Não | — | `UNIQUE` (índice `LOWER(email)`) |
-| `password_hash` | `VARCHAR(255)` | Não | — | Hash Argon2id |
-| `display_name` | `VARCHAR(60)` | Sim | `NULL` | Nome de exibição no perfil |
-| `avatar_url` | `VARCHAR(512)` | Sim | `NULL` | URL pública do avatar |
-| `bio` | `TEXT` | Sim | `NULL` | Máximo de 300 caracteres validado na aplicação |
-| `is_email_verified` | `BOOLEAN` | Não | `false` | Atualizado após confirmação via Resend |
+| `password_hash` | `VARCHAR(255)` | Sim | `NULL` | Hash Argon2id (`NULL` para contas criadas exclusivamente via Discord OAuth2) |
+| `display_name` | `VARCHAR(50)` | Sim | `NULL` | Nome de exibição no perfil (até 50 chars; fallback para `username` nas respostas) |
+| `avatar_url` | `VARCHAR(512)` | Sim | `NULL` | URL pública resolvida do avatar ativo |
+| `avatar_key` | `VARCHAR(255)` | Sim | `NULL` | Object key no Cloudflare R2 (`avatars/{user_id}/avatar-{uuid}.{ext}`) |
+| `avatar_source` | `VARCHAR(20)` | Não | `'none'` | `CHECK (avatar_source IN ('custom', 'discord', 'none'))` |
+| `bio` | `VARCHAR(240)` | Sim | `NULL` | Biografia do usuário (máximo de 240 caracteres) |
+| `discord_id` | `VARCHAR(64)` | Sim | `NULL` | `UNIQUE` (`ix_users_discord_id`) — Snowflake ID da conta Discord vinculada |
+| `discord_username` | `VARCHAR(100)` | Sim | `NULL` | Username da conta Discord vinculada |
+| `discord_avatar_url` | `VARCHAR(512)` | Sim | `NULL` | URL do avatar no CDN do Discord |
+| `discord_linked_at` | `TIMESTAMPTZ` | Sim | `NULL` | Timestamp em que o Discord foi vinculado |
+| `is_email_verified` | `BOOLEAN` | Não | `false` | Atualizado após confirmação via Resend ou login Discord com `verified: true` |
 | `is_active` | `BOOLEAN` | Não | `true` | `false` bloqueia login e revoga acesso |
-| `is_2fa_enabled` | `BOOLEAN` | Não | `false` | **Reservado para v1.1 (2FA TOTP)** |
-| `totp_secret_encrypted` | `VARCHAR(512)` | Sim | `NULL` | **Reservado para v1.1 (Segredo Base32 criptografado com Fernet/AES)** |
+| `is_2fa_enabled` | `BOOLEAN` | Não | `false` | Indica se o 2FA TOTP está ativo na conta |
+| `totp_secret_encrypted` | `VARCHAR(512)` | Sim | `NULL` | Segredo Base32 TOTP criptografado em repouso com Fernet (`TOTP_ENCRYPTION_KEY`) |
+| `totp_backup_codes` | `JSONB` | Sim | `NULL` | Lista JSON (`list[str]`) de hashes `SHA-256` dos 8 códigos de backup de uso único |
 | `created_at` | `TIMESTAMPTZ` | Não | `now()` | Data de criação da conta |
 | `updated_at` | `TIMESTAMPTZ` | Não | `now()` | Atualizado em cada `UPDATE` |
 
-#### Campos Reservados para 2FA (`v1.1`)
-- `is_2fa_enabled`: Flag booleana que indica se o segundo fator está ativo na conta. No MVP permanece `false`.
-- `totp_secret_encrypted`: Armazenará o segredo TOTP gerado pelo `PyOTP` criptografado simetricamente em repouso (via `TOTP_ENCRYPTION_KEY`) antes de ser salvo no banco. Nunca deve armazenar o segredo TOTP em texto puro.
+#### Campos de 2FA TOTP e Códigos de Backup
+- `is_2fa_enabled`: Flag booleana que indica se o segundo fator está ativo na conta.
+- `totp_secret_encrypted`: Armazena o segredo Base32 gerado pelo `PyOTP` criptografado simetricamente em repouso com **Fernet** (`TOTP_ENCRYPTION_KEY`). Nunca armazena o segredo TOTP em texto puro.
+- `totp_backup_codes`: Armazena exclusivamente os hashes `SHA-256` dos códigos de backup de uso único gerados na ativação do 2FA. Quando um código de backup é utilizado no login ou desativação, seu hash é removido da lista.
 
 ---
 
@@ -339,9 +354,10 @@ A coluna `clips.technical_metadata` armazena propriedades de codificação e res
 Todos os índices abaixo devem constar nas migrations do Alembic para garantir consultas rápidas em listagens, feeds, buscas e verificações de autenticação:
 
 ```sql
--- 1. Users: busca case-insensitive para login e verificação de unicidade
+-- 1. Users: busca case-insensitive para login, unicidade e lookup por Discord ID
 CREATE UNIQUE INDEX ix_users_lower_email ON users (LOWER(email));
 CREATE UNIQUE INDEX ix_users_lower_username ON users (LOWER(username));
+CREATE UNIQUE INDEX ix_users_discord_id ON users (discord_id);
 
 -- 2. Refresh Tokens: lookup rápido por hash, família de rotação e usuário
 CREATE UNIQUE INDEX ix_refresh_tokens_token_hash ON refresh_tokens (token_hash);

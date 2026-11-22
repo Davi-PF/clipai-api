@@ -37,7 +37,9 @@ def test_settings_loads_valid_configuration(monkeypatch: pytest.MonkeyPatch) -> 
     assert settings.max_video_duration_seconds == 120
     assert settings.max_thumbnail_size_bytes == 5_242_880
     assert settings.refresh_cookie_name == "clipai_refresh_token"
-    assert settings.totp_issuer_name == "CLIPAI"
+    assert settings.totp_issuer_name == "CLIPAÍ"
+    assert settings.max_avatar_size_bytes == 5_242_880
+    assert settings.discord_redirect_uri == "http://localhost:3000/auth/discord/callback"
 
 
 def test_settings_rejects_non_async_database_url(monkeypatch: pytest.MonkeyPatch) -> None:

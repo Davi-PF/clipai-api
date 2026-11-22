@@ -6,6 +6,7 @@ from collections.abc import AsyncGenerator
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from cryptography.fernet import Fernet
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,6 +17,10 @@ def _bootstrap_test_environment() -> None:
         "APP_ENV": "development",
         "DATABASE_URL": "postgresql+asyncpg://localhost:5432/clipai_test",
         "JWT_SECRET_KEY": secrets.token_hex(32),
+        "TOTP_ENCRYPTION_KEY": Fernet.generate_key().decode("utf-8"),
+        "DISCORD_CLIENT_ID": "test_discord_client_id",
+        "DISCORD_CLIENT_SECRET": "test_discord_client_secret",
+        "DISCORD_REDIRECT_URI": "http://localhost:3000/auth/discord/callback",
         "R2_ACCOUNT_ID": "test_account",
         "R2_ACCESS_KEY_ID": secrets.token_hex(16),
         "R2_SECRET_ACCESS_KEY": secrets.token_hex(32),
