@@ -45,6 +45,28 @@ async def test_user_repository_queries_and_mutations() -> None:
 
     await repo.update_password_hash(created, "new_hash")
     assert created.password_hash == "new_hash"
+    assert created.hashed_password == "new_hash"
+    assert created.has_password is True
+    created.hashed_password = None
+    assert created.has_password is False
+    assert created.discord_linked is False
+
+    assert await repo.get_by_discord_id("123456") is sample_user
+    assert await repo.save(created) is created
+
+    # Test get_public_stats
+    clips_result = MagicMock()
+    clips_result.one.return_value = (4, 150, 32)
+    colls_result = MagicMock()
+    colls_result.scalar_one.return_value = 2
+    session.execute.side_effect = [clips_result, colls_result]
+    stats = await repo.get_public_stats(sample_user.id)
+    assert stats == {
+        "clips_count": 4,
+        "total_views": 150,
+        "total_likes": 32,
+        "collections_count": 2,
+    }
 
     session.commit.assert_not_awaited()
 

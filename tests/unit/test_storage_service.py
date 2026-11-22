@@ -20,10 +20,13 @@ def test_build_object_keys_and_public_url(test_settings: Settings) -> None:
     video_key = service.build_video_key(user_id, clip_id, "video/mp4")
     webm_key = service.build_video_key(user_id, clip_id, "video/webm")
     thumb_key = service.build_thumbnail_key(user_id, clip_id, "image/webp")
+    avatar_uuid = uuid4()
+    avatar_key = service.build_avatar_key(user_id, avatar_uuid, "image/png")
 
     assert video_key == f"clips/{user_id}/{clip_id}/video.mp4"
     assert webm_key == f"clips/{user_id}/{clip_id}/video.webm"
     assert thumb_key == f"clips/{user_id}/{clip_id}/thumb.webp"
+    assert avatar_key == f"avatars/{user_id}/avatar-{avatar_uuid}.png"
     assert service.build_public_url(video_key) == f"https://cdn.clipai.test/{video_key}"
 
     with pytest.raises(AppError) as bad_video:
@@ -33,6 +36,10 @@ def test_build_object_keys_and_public_url(test_settings: Settings) -> None:
     with pytest.raises(AppError) as bad_thumb:
         service.build_thumbnail_key(user_id, clip_id, "image/gif")
     assert bad_thumb.value.status_code == 415
+
+    with pytest.raises(AppError) as bad_avatar:
+        service.build_avatar_key(user_id, avatar_uuid, "image/svg+xml")
+    assert bad_avatar.value.status_code == 415
 
 
 def test_storage_service_initializes_boto3_client_for_r2(test_settings: Settings) -> None:
