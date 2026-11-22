@@ -437,47 +437,53 @@ Valida os metadados do vídeo e da thumbnail, cria o registro `pending_upload` n
 ```json
 {
   "clip_id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+  "slug": "xK9mP2qR7zA",
   "status": "pending_upload",
-  "expires_in": 900,
+  "expires_in": 600,
   "video_upload": {
     "url": "https://<account_id>.r2.cloudflarestorage.com/clipai-media/clips/550e.../9b1d.../video.mp4?X-Amz-Algorithm=AWS4-HMAC-SHA256...",
     "method": "PUT",
     "headers": {
-      "Content-Type": "video/mp4",
-      "Content-Length": "48234496"
+      "Content-Type": "video/mp4"
     }
   },
   "thumbnail_upload": {
     "url": "https://<account_id>.r2.cloudflarestorage.com/clipai-media/clips/550e.../9b1d.../thumb.webp?X-Amz-Algorithm=AWS4-HMAC-SHA256...",
     "method": "PUT",
     "headers": {
-      "Content-Type": "image/webp",
-      "Content-Length": "184320"
+      "Content-Type": "image/webp"
     }
   }
 }
 ```
+> Nota: `thumbnail_mime_type` e `thumbnail_size_bytes` são opcionais no request; quando omitidos, `thumbnail_upload` é retornado como `null`.
 - **Erros:** `403 EMAIL_NOT_VERIFIED`, `413 FILE_TOO_LARGE`, `415 UNSUPPORTED_MEDIA_TYPE`, `422 VALIDATION_ERROR`.
 
 ---
 
-### 7.2. `POST /api/v1/clips/{clip_id}/confirm-upload`
+### 7.2. `POST /api/v1/clips/{clip_id}/confirm-upload` (alias: `/confirm`)
 Confirma que o upload direto ao Cloudflare R2 foi concluído, executa `HeadObject` no R2 e altera o `status` do clipe de `pending_upload` para `ready`.
 - **Auth:** Bearer JWT obrigatório (apenas o autor do clipe)
 - **Request Body:** Nenhum
-- **Response `200 OK`:** Objeto `ClipDetailResponse` (ver `GET /api/v1/clips/{clip_id}`).
+- **Response `200 OK`:** Objeto `ClipDetailResponse` (ver `GET /api/v1/clips/{slug}`).
 - **Erros:** `400 UPLOAD_VERIFICATION_FAILED`, `403 FORBIDDEN`, `404 RESOURCE_NOT_FOUND`.
 
 ---
 
 ### 7.3. `GET /api/v1/clips`
-Lista paginada de clipes públicos (`status = 'ready'` e `privacy = 'public'`) com suporte a busca e filtros.
-- **Auth:** Opcional (se autenticado, preenche `is_liked_by_me` e `is_favorited_by_me`)
+Lista paginada de clipes (`status = 'ready'`) com suporte a busca, filtros e regras de visibilidade:
+- **Anônimo:** retorna apenas `privacy = 'public'`.
+- **Autenticado:** retorna `public`, `friends` e os próprios clipes `unlisted`.
+- **Com `mine=true` (autenticado obrigatório):** retorna todos os clipes `ready` do usuário autenticado (`public`, `friends` e `unlisted`).
+- **Auth:** Opcional (obrigatório quando `mine=true`)
 - **Query Params:**
-  - `q` (opcional): Busca textual em `title` e `description`
+  - `q` (opcional): Busca textual em `title`, `description` e nome do jogo
+  - `game` (opcional): Filtra por UUID ou `slug` do jogo
   - `game_slug` (opcional): Filtra pelo slug do jogo
   - `game_id` (opcional): Filtra pelo UUID do jogo
   - `tag` (opcional): Filtra pelo slug da tag
+  - `author` (opcional): Filtra pelo `username` do autor
+  - `mine` (opcional, default `false`): Lista apenas clipes do usuário autenticado
   - `sort` (opcional): `recent` (default) ou `popular`
   - `page` (default: `1`), `page_size` (default: `20`, máx: `50`)
 - **Response `200 OK`:**
@@ -486,6 +492,7 @@ Lista paginada de clipes públicos (`status = 'ready'` e `privacy = 'public'`) c
   "items": [
     {
       "id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+      "slug": "xK9mP2qR7zA",
       "title": "Clutch 1v4 de AWP na Mirage",
       "privacy": "public",
       "video_url": "https://cdn.clipai.com.br/clips/550e.../9b1d.../video.mp4",
@@ -504,8 +511,8 @@ Lista paginada de clipes públicos (`status = 'ready'` e `privacy = 'public'`) c
       },
       "game": {
         "id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
-        "name": "Counter-Strike 2",
-        "slug": "counter-strike-2"
+        "name": "CS2",
+        "slug": "cs2"
       },
       "tags": ["clutch", "awp", "mirage"],
       "created_at": "2026-11-21T22:05:00Z"
@@ -520,13 +527,17 @@ Lista paginada de clipes públicos (`status = 'ready'` e `privacy = 'public'`) c
 
 ---
 
-### 7.4. `GET /api/v1/clips/{clip_id}`
-Retorna os detalhes completos de um clipe (`status = 'ready'`), respeitando sua configuração de `privacy` (`public` e `unlisted` acessíveis por qualquer pessoa com o link; `friends` restrito ao autor no MVP).
-- **Auth:** Opcional (obrigatório para visualizar clipe `friends` do próprio autor)
+### 7.4. `GET /api/v1/clips/{slug}` (também aceita `clip_id` UUID)
+Retorna os detalhes completos de um clipe (`status = 'ready'`), respeitando sua configuração de `privacy`:
+- `public` e `unlisted`: acessíveis por qualquer pessoa com o link.
+- `friends`: acessível apenas para usuários autenticados (`401 INVALID_TOKEN` para anônimos).
+- Clipes `pending_upload` ou `failed` nunca são expostos para terceiros (`404 RESOURCE_NOT_FOUND`).
+- **Auth:** Opcional (obrigatório para visualizar clipes `friends`)
 - **Response `200 OK` (`ClipDetailResponse`):**
 ```json
 {
   "id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+  "slug": "xK9mP2qR7zA",
   "title": "Clutch 1v4 de AWP na Mirage",
   "description": "Round decisivo na prorrogação.",
   "status": "ready",
@@ -561,8 +572,8 @@ Retorna os detalhes completos de um clipe (`status = 'ready'`), respeitando sua 
   },
   "game": {
     "id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
-    "name": "Counter-Strike 2",
-    "slug": "counter-strike-2"
+    "name": "CS2",
+    "slug": "cs2"
   },
   "tags": ["clutch", "awp", "mirage"],
   "created_at": "2026-11-21T22:05:00Z",

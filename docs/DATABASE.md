@@ -72,6 +72,7 @@ erDiagram
 
     clips {
         uuid id PK
+        varchar slug UK
         uuid user_id FK
         uuid game_id FK
         varchar title
@@ -200,6 +201,7 @@ Tabela central de clipes de vídeo e seus metadados.
 | Coluna | Tipo PostgreSQL | Nulo? | Default | Constraints / Observações |
 | :--- | :--- | :---: | :--- | :--- |
 | `id` | `UUID` | Não | `gen_random_uuid()` | `PRIMARY KEY` |
+| `slug` | `VARCHAR(32)` | Não | — | `UNIQUE` — Slug curto URL-safe para links `/c/[slug]` |
 | `user_id` | `UUID` | Não | — | `FOREIGN KEY REFERENCES users(id) ON DELETE CASCADE` |
 | `game_id` | `UUID` | Sim | `NULL` | `FOREIGN KEY REFERENCES games(id) ON DELETE SET NULL` |
 | `title` | `VARCHAR(120)` | Não | — | Título do clipe (3 a 120 caracteres) |
@@ -207,7 +209,7 @@ Tabela central de clipes de vídeo e seus metadados.
 | `status` | `VARCHAR(20)` | Não | `'pending_upload'` | `CHECK (status IN ('pending_upload', 'ready', 'failed'))` |
 | `privacy` | `VARCHAR(20)` | Não | `'public'` | `CHECK (privacy IN ('public', 'friends', 'unlisted'))` |
 | `video_object_key` | `VARCHAR(255)` | Não | — | `UNIQUE` (ex.: `clips/{user_id}/{clip_id}/video.mp4`) |
-| `thumbnail_object_key` | `VARCHAR(255)` | Não | — | `UNIQUE` (ex.: `clips/{user_id}/{clip_id}/thumb.webp`) |
+| `thumbnail_object_key` | `VARCHAR(255)` | Sim | `NULL` | `UNIQUE` (ex.: `clips/{user_id}/{clip_id}/thumb.webp`, opcional) |
 | `file_size_bytes` | `BIGINT` | Não | — | `CHECK (file_size_bytes > 0 AND file_size_bytes <= 104857600)` |
 | `duration_seconds` | `NUMERIC(6,2)` | Não | — | `CHECK (duration_seconds >= 1.00 AND duration_seconds <= 120.00)` |
 | `mime_type` | `VARCHAR(30)` | Não | — | `CHECK (mime_type IN ('video/mp4', 'video/webm'))` |
@@ -344,7 +346,9 @@ CREATE UNIQUE INDEX ix_refresh_tokens_token_hash ON refresh_tokens (token_hash);
 CREATE INDEX ix_refresh_tokens_user_id ON refresh_tokens (user_id);
 CREATE INDEX ix_refresh_tokens_family_id ON refresh_tokens (family_id);
 
--- 3. Clips: índice composto parcial para o feed público principal (ordenado por recentes ou populares)
+-- 3. Clips: lookup por slug e índice composto parcial para o feed público principal
+CREATE UNIQUE INDEX ix_clips_slug ON clips (slug);
+
 CREATE INDEX ix_clips_public_feed_recent
     ON clips (created_at DESC)
     WHERE status = 'ready' AND privacy = 'public';

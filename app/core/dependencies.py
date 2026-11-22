@@ -25,13 +25,13 @@ def _invalid_token_error() -> AppError:
     )
 
 
-async def get_current_user(
-    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
-    session: AsyncSession = Depends(get_db),
-    settings: Settings = Depends(get_settings),
+async def _resolve_user_from_credentials(
+    credentials: HTTPAuthorizationCredentials,
+    session: AsyncSession,
+    settings: Settings,
 ) -> User:
-    """Resolve and validate the authenticated user from a Bearer access JWT."""
-    if credentials is None or credentials.scheme.lower() != "bearer" or not credentials.credentials:
+    """Decode Bearer JWT and return active User or raise 401 INVALID_TOKEN."""
+    if credentials.scheme.lower() != "bearer" or not credentials.credentials:
         raise _invalid_token_error()
 
     payload = decode_jwt_token(
@@ -50,6 +50,28 @@ async def get_current_user(
         raise _invalid_token_error()
 
     return user
+
+
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+    session: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> User:
+    """Resolve and validate the authenticated user from a Bearer access JWT."""
+    if credentials is None:
+        raise _invalid_token_error()
+    return await _resolve_user_from_credentials(credentials, session, settings)
+
+
+async def get_optional_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+    session: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> User | None:
+    """Return authenticated User if Bearer header is present, or None for anonymous."""
+    if credentials is None:
+        return None
+    return await _resolve_user_from_credentials(credentials, session, settings)
 
 
 async def get_verified_user(

@@ -54,7 +54,6 @@ clipai-api/
 │   │   ├── dependencies.py         # get_current_user, get_verified_user, get_optional_user
 │   │   ├── exceptions.py           # Exceções de domínio e handler padronizado PT-BR
 │   │   ├── rate_limit.py           # Rate limiter para rotas sensíveis
-│   │   ├── r2_client.py            # Wrapper assíncrono sobre boto3 para Cloudflare R2
 │   │   └── security.py             # Argon2id, JWT (access/verify/reset), SHA-256 e Fernet (2FA)
 │   ├── models/
 │   │   ├── __init__.py             # Exporta todos os models para autogenerate do Alembic
@@ -83,6 +82,7 @@ clipai-api/
 │   │   ├── __init__.py
 │   │   ├── auth_service.py
 │   │   ├── email_service.py
+│   │   ├── storage_service.py      # Wrapper assíncrono sobre boto3 para Cloudflare R2
 │   │   ├── user_service.py
 │   │   ├── clip_service.py
 │   │   └── collection_service.py
@@ -140,8 +140,8 @@ clipai-api/
 ## 5. Integrações Externas
 
 ### 5.1. Cloudflare R2 (`boto3` via S3 API)
-- **Endpoint S3:** `https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com` com `region_name="auto"` e `signature_version="s3v4"`.
-- **Não-Bloqueio do Event Loop:** Como `boto3` é síncrono, as chamadas de rede ao R2 (`head_object`, `delete_objects`) devem ser executadas via `await asyncio.to_thread(...)` dentro de `app/core/r2_client.py` (a geração local `generate_presigned_url` é puramente criptográfica em CPU, mas também encapsulada pelo cliente R2).
+- **Endpoint S3:** `R2_ENDPOINT_URL` (ou derivado como `https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com`) com `region_name="auto"` e `signature_version="s3v4"`.
+- **Não-Bloqueio do Event Loop:** Como `boto3` é síncrono, as chamadas de rede ao R2 (`generate_presigned_url`, `head_object`, `delete_objects`) são executadas via `await asyncio.to_thread(...)` dentro de `app/services/storage_service.py`.
 - **Padrão de Object Keys:**
   - Vídeo: `clips/{user_id}/{clip_id}/video.{ext}`
   - Thumbnail: `clips/{user_id}/{clip_id}/thumb.{ext}`

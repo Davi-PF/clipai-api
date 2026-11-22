@@ -56,11 +56,14 @@ class Settings(BaseSettings):
 
     # Cloudflare R2 (S3 Compatible Storage)
     r2_account_id: str
+    r2_endpoint_url: str | None = None
     r2_access_key_id: SecretStr
     r2_secret_access_key: SecretStr
     r2_bucket_name: str = "clipai-media"
-    r2_public_base_url: str
-    r2_presigned_url_expire_seconds: int = Field(default=900, ge=60, le=3600)
+    r2_public_base_url: str = Field(
+        validation_alias=AliasChoices("R2_PUBLIC_BASE_URL", "R2_PUBLIC_URL"),
+    )
+    r2_presigned_url_expire_seconds: int = Field(default=600, ge=60, le=3600)
 
     # Upload Limits
     max_video_size_bytes: int = Field(default=104_857_600, ge=1)
@@ -92,6 +95,13 @@ class Settings(BaseSettings):
         if self.refresh_cookie_secure is not None:
             return self.refresh_cookie_secure
         return self.is_production
+
+    @property
+    def effective_r2_endpoint_url(self) -> str:
+        """Return explicit R2_ENDPOINT_URL or derive Cloudflare R2 S3 endpoint from account ID."""
+        if self.r2_endpoint_url and self.r2_endpoint_url.strip():
+            return self.r2_endpoint_url.strip().rstrip("/")
+        return f"https://{self.r2_account_id}.r2.cloudflarestorage.com"
 
     @field_validator("database_url")
     @classmethod
