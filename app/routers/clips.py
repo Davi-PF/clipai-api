@@ -3,18 +3,21 @@
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
 from app.core.database import get_db
 from app.core.dependencies import get_current_user, get_optional_user, get_verified_user
-from app.core.rate_limit import check_user_rate_limit
+from app.core.rate_limit import check_clip_view_rate_limit, check_user_rate_limit
 from app.models.user import User
 from app.schemas.clip import (
     ClipDetailResponse,
+    ClipFavoriteResponse,
+    ClipLikeResponse,
     ClipSummaryResponse,
     ClipUpdateRequest,
+    ClipViewResponse,
     UploadUrlRequest,
     UploadUrlResponse,
 )
@@ -101,7 +104,9 @@ async def list_clips(
     tag: str | None = Query(default=None, max_length=30),
     author: str | None = Query(default=None, max_length=30),
     mine: bool = Query(default=False),
-    sort: Literal["recent", "popular"] = Query(default="recent"),
+    favorited: bool = Query(default=False),
+    collection_id: UUID | None = Query(default=None),
+    sort: Literal["recent", "popular", "featured"] = Query(default="recent"),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=50),
     current_user: User | None = Depends(get_optional_user),
@@ -116,6 +121,8 @@ async def list_clips(
         tag=tag,
         author=author,
         mine=mine,
+        favorited=favorited,
+        collection_id=collection_id,
         sort=sort,
         page=page,
         page_size=page_size,
@@ -164,3 +171,99 @@ async def delete_clip(
 ) -> None:
     """Delete clip and associated R2 media objects (owner only)."""
     await clip_service.delete_clip(clip_id, current_user)
+
+
+@router.post(
+    "/{clip_id}/like",
+    response_model=ClipLikeResponse,
+    summary="Curte o clipe de forma idempotente",
+)
+async def like_clip(
+    clip_id: UUID,
+    current_user: User = Depends(get_verified_user),
+    clip_service: ClipService = Depends(get_clip_service),
+) -> ClipLikeResponse:
+    """Like a ready clip."""
+    return await clip_service.like_clip(clip_id, current_user)
+
+
+@router.delete(
+    "/{clip_id}/like",
+    response_model=ClipLikeResponse,
+    summary="Remove a curtida do clipe de forma idempotente",
+)
+async def unlike_clip(
+    clip_id: UUID,
+    current_user: User = Depends(get_current_user),
+    clip_service: ClipService = Depends(get_clip_service),
+) -> ClipLikeResponse:
+    """Remove like from a ready clip."""
+    return await clip_service.unlike_clip(clip_id, current_user)
+
+
+@router.post(
+    "/{clip_id}/favorite",
+    response_model=ClipFavoriteResponse,
+    summary="Favorita o clipe de forma idempotente",
+)
+async def favorite_clip(
+    clip_id: UUID,
+    current_user: User = Depends(get_verified_user),
+    clip_service: ClipService = Depends(get_clip_service),
+) -> ClipFavoriteResponse:
+    """Favorite a ready clip."""
+    return await clip_service.favorite_clip(clip_id, current_user)
+
+
+@router.delete(
+    "/{clip_id}/favorite",
+    response_model=ClipFavoriteResponse,
+    summary="Remove o clipe dos favoritos de forma idempotente",
+)
+async def unfavorite_clip(
+    clip_id: UUID,
+    current_user: User = Depends(get_current_user),
+    clip_service: ClipService = Depends(get_clip_service),
+) -> ClipFavoriteResponse:
+    """Remove clip from user favorites."""
+    return await clip_service.unfavorite_clip(clip_id, current_user)
+
+
+@router.post(
+    "/{clip_id}/views",
+    response_model=ClipViewResponse,
+    summary="Incrementa atomicamente o contador de visualizações do clipe",
+)
+async def register_clip_view(
+    clip_id: UUID,
+    request: Request,
+    current_user: User | None = Depends(get_optional_user),
+    clip_service: ClipService = Depends(get_clip_service),
+) -> ClipViewResponse:
+    """Increment clip view count with anti-F5 rate limit."""
+    await check_clip_view_rate_limit(
+        request=request,
+        clip_id=clip_id,
+        user_id=current_user.id if current_user else None,
+    )
+    return await clip_service.register_view(clip_id, current_user)
+
+
+@router.post(
+    "/{clip_id}/view",
+    response_model=ClipViewResponse,
+    include_in_schema=False,
+)
+async def register_clip_view_alias(
+    clip_id: UUID,
+    request: Request,
+    current_user: User | None = Depends(get_optional_user),
+    clip_service: ClipService = Depends(get_clip_service),
+) -> ClipViewResponse:
+    """Alias route for POST /api/v1/clips/{clip_id}/views."""
+    await check_clip_view_rate_limit(
+        request=request,
+        clip_id=clip_id,
+        user_id=current_user.id if current_user else None,
+    )
+    return await clip_service.register_view(clip_id, current_user)

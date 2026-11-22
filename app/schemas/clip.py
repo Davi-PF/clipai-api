@@ -128,6 +128,8 @@ class ClipSummaryResponse(BaseModel):
     views_count: int
     likes_count: int
     favorites_count: int
+    is_liked: bool = False
+    is_favorited: bool = False
     is_liked_by_me: bool = False
     is_favorited_by_me: bool = False
     author: ClipAuthorSummary
@@ -156,6 +158,8 @@ class ClipDetailResponse(BaseModel):
     views_count: int
     likes_count: int
     favorites_count: int
+    is_liked: bool = False
+    is_favorited: bool = False
     is_liked_by_me: bool = False
     is_favorited_by_me: bool = False
     author: ClipAuthorSummary
@@ -163,6 +167,37 @@ class ClipDetailResponse(BaseModel):
     tags: list[str]
     created_at: datetime
     updated_at: datetime
+
+
+class ClipLikeResponse(BaseModel):
+    """Response for POST/DELETE /api/v1/clips/{clip_id}/like."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    clip_id: UUID
+    liked: bool
+    is_liked_by_me: bool
+    likes_count: int
+
+
+class ClipFavoriteResponse(BaseModel):
+    """Response for POST/DELETE /api/v1/clips/{clip_id}/favorite."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    clip_id: UUID
+    favorited: bool
+    is_favorited_by_me: bool
+    favorites_count: int
+
+
+class ClipViewResponse(BaseModel):
+    """Response for POST /api/v1/clips/{clip_id}/views (or /view)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    clip_id: UUID
+    views_count: int
 
 
 class ClipUpdateRequest(BaseModel):
