@@ -9,7 +9,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import Settings, get_settings
 from app.core.database import dispose_engine
 from app.core.exceptions import register_exception_handlers
+from app.routers.auth import router as auth_router
 from app.routers.health import router as health_router
+from app.routers.users import router as users_router
 
 
 @asynccontextmanager
@@ -49,6 +51,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     register_exception_handlers(application)
     application.include_router(health_router, prefix=resolved_settings.api_v1_prefix)
+    application.include_router(auth_router, prefix=resolved_settings.api_v1_prefix)
+    application.include_router(users_router, prefix=resolved_settings.api_v1_prefix)
 
     return application
 
