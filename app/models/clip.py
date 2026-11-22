@@ -201,3 +201,49 @@ class Clip(TimestampMixin, Base):
     author: Mapped["User"] = relationship()
     game: Mapped["Game | None"] = relationship()
     tags: Mapped[list["Tag"]] = relationship(secondary="clip_tags")
+
+
+class ClipLike(Base):
+    """Relational record of user likes on clips."""
+
+    __tablename__ = "clip_likes"
+    __table_args__ = (Index("ix_clip_likes_clip_id", "clip_id"),)
+
+    user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    clip_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("clips.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
+class ClipFavorite(Base):
+    """Relational record of user-favorited clips."""
+
+    __tablename__ = "clip_favorites"
+    __table_args__ = (Index("ix_clip_favorites_user_created", "user_id", desc("created_at")),)
+
+    user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    clip_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("clips.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
