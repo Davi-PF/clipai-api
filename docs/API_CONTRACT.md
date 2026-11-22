@@ -484,7 +484,9 @@ Lista paginada de clipes (`status = 'ready'`) com suporte a busca, filtros e reg
   - `tag` (opcional): Filtra pelo slug da tag
   - `author` (opcional): Filtra pelo `username` do autor
   - `mine` (opcional, default `false`): Lista apenas clipes do usuário autenticado
-  - `sort` (opcional): `recent` (default) ou `popular`
+  - `favorited` (opcional, default `false`): Lista apenas clipes favoritados pelo usuário autenticado (requer auth)
+  - `collection_id` (opcional): Filtra clipes pertencentes à coleção informada
+  - `sort` (opcional): `recent` (default), `popular` ou `featured` (engajamento/destaques)
   - `page` (default: `1`), `page_size` (default: `20`, máx: `50`)
 - **Response `200 OK`:**
 ```json
@@ -501,6 +503,8 @@ Lista paginada de clipes (`status = 'ready'`) com suporte a busca, filtros e reg
       "views_count": 128,
       "likes_count": 24,
       "favorites_count": 7,
+      "is_liked": false,
+      "is_favorited": false,
       "is_liked_by_me": false,
       "is_favorited_by_me": false,
       "author": {
@@ -607,8 +611,8 @@ Remove o clipe do banco de dados e exclui os objetos de vídeo e thumbnail corre
 
 ---
 
-### 7.7. `POST /api/v1/clips/{clip_id}/views`
-Registra uma visualização no clipe e incrementa `views_count`.
+### 7.7. `POST /api/v1/clips/{clip_id}/views` (alias: `/view`)
+Registra uma visualização no clipe e incrementa `views_count` atomicamente.
 - **Auth:** Opcional (Rate limit: 1 incremento por IP/usuário por `clip_id` a cada 10 minutos)
 - **Response `200 OK`:**
 ```json
@@ -627,8 +631,9 @@ Registra uma visualização no clipe e incrementa `views_count`.
 ```json
 {
   "clip_id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
-  "likes_count": 25,
-  "is_liked_by_me": true
+  "liked": true,
+  "is_liked_by_me": true,
+  "likes_count": 25
 }
 ```
 - **`POST /api/v1/clips/{clip_id}/favorite`** — Favorita o clipe (idempotente). Auth: Bearer JWT (`is_email_verified = true`).
@@ -637,8 +642,9 @@ Registra uma visualização no clipe e incrementa `views_count`.
 ```json
 {
   "clip_id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
-  "favorites_count": 8,
-  "is_favorited_by_me": true
+  "favorited": true,
+  "is_favorited_by_me": true,
+  "favorites_count": 8
 }
 ```
 
@@ -646,15 +652,22 @@ Registra uma visualização no clipe e incrementa `views_count`.
 
 ## 8. Endpoints — Coleções (`/api/v1/collections`)
 
-### 8.1. `POST /api/v1/collections`
-Cria uma nova coleção (playlist) de clipes.
+### 8.1. `GET /api/v1/collections`
+Lista coleções acessíveis ao usuário (com `mine=true` para gerenciar as próprias), incluindo contagem de clipes e até 4 thumbnails de preview.
+- **Auth:** Opcional (obrigatório quando `mine=true`)
+- **Query Params:** `mine` (default `false`), `author` (opcional), `page`, `page_size`
+- **Response `200 OK`:** Envelope paginado de `CollectionSummaryResponse`.
+
+### 8.2. `POST /api/v1/collections`
+Cria uma nova coleção (playlist) de clipes. Aceita `title` (ou alias `name`), `description`, `privacy` e `accent_color` (`#RRGGBB` opcional).
 - **Auth:** Bearer JWT obrigatório (`is_email_verified = true`)
 - **Request Body:**
 ```json
 {
   "title": "Melhores Clutches de CS2",
   "description": "Compilado de rounds 1vX.",
-  "privacy": "public"
+  "privacy": "public",
+  "accent_color": "#2EB886"
 }
 ```
 - **Response `201 Created`:**
@@ -664,7 +677,9 @@ Cria uma nova coleção (playlist) de clipes.
   "title": "Melhores Clutches de CS2",
   "description": "Compilado de rounds 1vX.",
   "privacy": "public",
+  "accent_color": "#2EB886",
   "clips_count": 0,
+  "preview_thumbnails": [],
   "owner": {
     "id": "550e8400-e29b-41d4-a716-446655440000",
     "username": "fallen_br",
@@ -675,15 +690,16 @@ Cria uma nova coleção (playlist) de clipes.
 }
 ```
 
-### 8.2. `GET /api/v1/users/{username}/collections`
-Lista as coleções de um usuário (apenas `public` para visitantes; todas as coleções se o solicitante autenticado for o próprio dono).
+### 8.3. `GET /api/v1/users/{username}/collections`
+Lista as coleções de um usuário (apenas `public` para visitantes; inclui `friends` para autenticados e `unlisted` para o próprio dono).
 - **Auth:** Opcional
 - **Query Params:** `page`, `page_size`
-- **Response `200 OK`:** Envelope paginado de coleções.
+- **Response `200 OK`:** Envelope paginado de `CollectionSummaryResponse`.
 
-### 8.3. `GET /api/v1/collections/{collection_id}`
-Retorna os metadados da coleção e a lista ordenada de clipes pertencentes a ela.
+### 8.4. `GET /api/v1/collections/{collection_id}`
+Retorna os metadados da coleção e a lista paginada e ordenada de clipes `ready` pertencentes a ela.
 - **Auth:** Opcional (respeita `collection.privacy` e filtra os clipes internos conforme `clip.privacy`)
+- **Query Params:** `page` (default `1`), `page_size` (default `20`, máx `50`)
 - **Response `200 OK`:**
 ```json
 {
@@ -691,6 +707,8 @@ Retorna os metadados da coleção e a lista ordenada de clipes pertencentes a el
   "title": "Melhores Clutches de CS2",
   "description": "Compilado de rounds 1vX.",
   "privacy": "public",
+  "accent_color": "#2EB886",
+  "clips_count": 1,
   "owner": {
     "id": "550e8400-e29b-41d4-a716-446655440000",
     "username": "fallen_br",
@@ -702,32 +720,41 @@ Retorna os metadados da coleção e a lista ordenada de clipes pertencentes a el
       "added_at": "2026-11-21T22:12:00Z",
       "clip": {
         "id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+        "slug": "xK9mP2qR7zA",
         "title": "Clutch 1v4 de AWP na Mirage",
+        "video_url": "https://cdn.clipai.com.br/clips/550e.../9b1d.../video.mp4",
         "thumbnail_url": "https://cdn.clipai.com.br/clips/550e.../9b1d.../thumb.webp",
         "duration_seconds": 34.5,
         "views_count": 129,
-        "likes_count": 25
+        "likes_count": 25,
+        "is_liked": true,
+        "is_favorited": false,
+        "is_liked_by_me": true,
+        "is_favorited_by_me": false
       }
     }
   ],
+  "page": 1,
+  "page_size": 20,
+  "total_pages": 1,
   "created_at": "2026-11-21T22:10:00Z",
   "updated_at": "2026-11-21T22:12:00Z"
 }
 ```
 
-### 8.4. `PATCH /api/v1/collections/{collection_id}`
-Atualiza título, descrição ou privacidade da coleção.
+### 8.5. `PATCH /api/v1/collections/{collection_id}`
+Atualiza título (`title`/`name`), descrição, cor de destaque (`accent_color`) ou privacidade da coleção.
 - **Auth:** Bearer JWT obrigatório (apenas o dono da coleção)
-- **Request Body:** `{ "title": "...", "description": "...", "privacy": "unlisted" }`
-- **Response `200 OK`:** Objeto da coleção atualizado.
+- **Request Body:** `{ "title": "...", "description": "...", "privacy": "unlisted", "accent_color": "#E8B04B" }`
+- **Response `200 OK`:** `CollectionSummaryResponse` atualizado.
 
-### 8.5. `DELETE /api/v1/collections/{collection_id}`
+### 8.6. `DELETE /api/v1/collections/{collection_id}`
 Exclui a coleção (não exclui os clipes originais, apenas os vínculos em `collection_clips`).
 - **Auth:** Bearer JWT obrigatório (apenas o dono da coleção)
 - **Response `204 No Content`**
 
-### 8.6. `POST /api/v1/collections/{collection_id}/clips`
-Adiciona um clipe (`status = 'ready'`) a uma coleção do usuário.
+### 8.7. `POST /api/v1/collections/{collection_id}/clips`
+Adiciona um clipe (`status = 'ready'`) a uma coleção do usuário de forma idempotente.
 - **Auth:** Bearer JWT obrigatório (apenas o dono da coleção)
 - **Request Body:**
 ```json
@@ -746,7 +773,7 @@ Adiciona um clipe (`status = 'ready'`) a uma coleção do usuário.
 }
 ```
 
-### 8.7. `DELETE /api/v1/collections/{collection_id}/clips/{clip_id}`
-Remove um clipe específico da coleção.
+### 8.8. `DELETE /api/v1/collections/{collection_id}/clips/{clip_id}`
+Remove um clipe específico da coleção (idempotente).
 - **Auth:** Bearer JWT obrigatório (apenas o dono da coleção)
 - **Response `204 No Content`**
