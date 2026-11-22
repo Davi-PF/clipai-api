@@ -52,6 +52,9 @@ Qualquer resposta com status `4xx` ou `5xx` segue estritamente este contrato:
 | :---: | :--- | :--- |
 | `400` | `BAD_REQUEST` | `"Não foi possível processar a requisição."` |
 | `400` | `UPLOAD_VERIFICATION_FAILED` | `"Não foi possível confirmar o envio do arquivo no servidor de mídia."` |
+| `400` | `INVALID_2FA_CODE` | `"Código de verificação 2FA ou código de backup inválido."` |
+| `400` | `DISCORD_OAUTH_FAILED` | `"Código de autorização do Discord inválido ou expirado."` |
+| `400` | `PASSWORD_REQUIRED_BEFORE_UNLINK` | `"Você não possui uma senha cadastrada. Defina uma senha antes de desvincular o Discord para não perder o acesso à sua conta."` |
 | `401` | `INVALID_CREDENTIALS` | `"E-mail ou senha incorretos."` |
 | `401` | `TOKEN_EXPIRED` | `"Sua sessão expirou. Faça login novamente."` |
 | `401` | `INVALID_TOKEN` | `"Token de autenticação inválido ou revogado."` |
@@ -197,8 +200,8 @@ Reenvia o e-mail de confirmação caso a conta ainda não esteja verificada.
 ---
 
 ### 4.4. `POST /api/v1/auth/login`
-Autentica o usuário, retorna o `access_token` no corpo JSON e define o cookie `clipai_refresh_token` (`HttpOnly; Secure; SameSite=Lax; Path=/api/v1/auth; Max-Age=604800`).
-- **Auth:** Público (Rate limit: 10 req/min por IP)
+Autentica o usuário. Quando `is_2fa_enabled = false`, retorna o `access_token` no corpo JSON e define o cookie `clipai_refresh_token` (`HttpOnly; Secure; SameSite=Lax; Path=/api/v1/auth; Max-Age=604800`). Quando `is_2fa_enabled = true`, **não emite** tokens de sessão ainda e retorna o desafio 2FA (`requires_2fa: true` + `challenge_token` de 5 minutos).
+- **Auth:** Público (Rate limit: 10 req/min por IP + e-mail)
 - **Request Body:**
 ```json
 {
@@ -206,13 +209,14 @@ Autentica o usuário, retorna o `access_token` no corpo JSON e define o cookie `
   "password": "StrongPassword!2026"
 }
 ```
-- **Response `200 OK`:**
+- **Response `200 OK` (Sem 2FA ativo):**
 ```json
 {
   "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
   "token_type": "bearer",
   "expires_in": 900,
   "requires_2fa": false,
+  "challenge_token": null,
   "temp_2fa_token": null,
   "user": {
     "id": "550e8400-e29b-41d4-a716-446655440000",
@@ -220,12 +224,39 @@ Autentica o usuário, retorna o `access_token` no corpo JSON e define o cookie `
     "email": "gabriel@exemplo.com.br",
     "display_name": "Gabriel Toledo",
     "avatar_url": null,
+    "avatar_source": "none",
+    "discord_linked": false,
+    "discord_username": null,
     "is_email_verified": true,
-    "is_2fa_enabled": false
+    "is_2fa_enabled": false,
+    "has_password": true
   }
 }
 ```
-> **Contrato reservado para v1.1 (2FA TOTP):** Os campos `requires_2fa` (booleano) e `temp_2fa_token` (`string | null`) já fazem parte do schema de resposta do login desde a v1.0. Na v1.0, `requires_2fa` é sempre `false` e `temp_2fa_token` é `null`. Na v1.1, quando `user.is_2fa_enabled == true`, o login retornará `requires_2fa: true`, `access_token: null` e um `temp_2fa_token` de 5 minutos para ser trocado em `POST /api/v1/auth/2fa/verify`.
+- **Response `200 OK` (Desafio quando `is_2fa_enabled = true`):**
+```json
+{
+  "access_token": null,
+  "token_type": "bearer",
+  "expires_in": 300,
+  "requires_2fa": true,
+  "challenge_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "temp_2fa_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "user": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "username": "fallen_br",
+    "email": "gabriel@exemplo.com.br",
+    "display_name": "Gabriel Toledo",
+    "avatar_url": "https://cdn.clipai.com.br/avatars/550e8400/avatar-123.webp",
+    "avatar_source": "custom",
+    "discord_linked": true,
+    "discord_username": "fallen_disc",
+    "is_email_verified": true,
+    "is_2fa_enabled": true,
+    "has_password": true
+  }
+}
+```
 
 ---
 
@@ -290,67 +321,247 @@ Redefine a senha do usuário usando o token recebido por e-mail e revoga todas a
 ---
 
 ### 4.9. `GET /api/v1/auth/me`
-Retorna os dados do perfil do usuário autenticado (mesmo contrato de `GET /api/v1/users/me`).
+Retorna os dados completos do perfil do usuário autenticado (mesmo contrato de `GET /api/v1/users/me`).
 - **Auth:** Bearer JWT obrigatório
 - **Response `200 OK`:** Objeto `UserMeResponse`.
+
+---
+
+### 4.10. `GET /api/v1/auth/discord/url`
+Gera a URL oficial de autorização do Discord OAuth2 (`scopes: identify email`) com token `state` assinado (JWT de 10 minutos contendo `mode` e `user_id` quando `mode=link`) para proteção contra CSRF.
+- **Auth:** Público quando `mode=login`; Bearer JWT obrigatório quando `mode=link`
+- **Query Params:** `mode` (`login` ou `link`, default: `login`)
+- **Response `200 OK`:**
+```json
+{
+  "url": "https://discord.com/api/oauth2/authorize?client_id=...&redirect_uri=...&response_type=code&scope=identify+email&state=eyJ...",
+  "authorization_url": "https://discord.com/api/oauth2/authorize?client_id=...&redirect_uri=...&response_type=code&scope=identify+email&state=eyJ...",
+  "state": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "mode": "login"
+}
+```
+
+---
+
+### 4.11. `POST /api/v1/auth/discord/callback`
+Valida o token `state` de CSRF, troca o `code` de autorização na API v10 do Discord e consulta `/users/@me`.
+- **Modo `link` (usuário autenticado):** valida que o `discord_id` não pertence a outra conta (`409 CONFLICT`), vincula os metadados do Discord e, se o usuário ainda não possuir avatar customizado, define automaticamente `avatar_source = "discord"`.
+- **Modo `login`:**
+  - Se o `discord_id` já estiver vinculado, autentica o usuário (respeitando o desafio 2FA caso `is_2fa_enabled = true`).
+  - Se não estiver vinculado, verifica se existe conta com o mesmo e-mail: faz vínculo automático somente se o e-mail no Discord estiver `verified: true` e a conta local já estiver verificada; caso contrário, cria uma nova conta com `username` único normalizado e `avatar_source = "discord"`.
+- **Auth:** Opcional (Rate limit: 10 req/min por IP)
+- **Request Body:**
+```json
+{
+  "code": "NhhvTDYsFcdgNLJh...",
+  "state": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+}
+```
+- **Response `200 OK`:** Objeto `DiscordCallbackResponse` (estende `LoginResponse` com `mode`, `linked` e `message`; define o cookie `HttpOnly` `clipai_refresh_token` em `mode="login"` quando `requires_2fa = false`).
+
+---
+
+### 4.12. `POST /api/v1/auth/2fa/setup`
+Gera um segredo Base32 aleatório (`pyotp.random_base32()`), criptografa em repouso com Fernet (`TOTP_ENCRYPTION_KEY`) e salva como pendente (mantendo `is_2fa_enabled = false` até a confirmação).
+- **Auth:** Bearer JWT obrigatório
+- **Response `200 OK`:**
+```json
+{
+  "otpauth_uri": "otpauth://totp/CLIPA%C3%8D:gabriel%40exemplo.com.br?secret=JBSWY3DPEHPK3PXP&issuer=CLIPA%C3%8D",
+  "manual_secret": "JBSWY3DPEHPK3PXP",
+  "secret": "JBSWY3DPEHPK3PXP",
+  "issuer": "CLIPAÍ"
+}
+```
+
+---
+
+### 4.13. `POST /api/v1/auth/2fa/enable`
+Valida o primeiro código TOTP de 6 dígitos (`valid_window=1`), ativa `is_2fa_enabled = true`, gera 8 códigos de backup de uso único, persiste apenas os hashes `SHA-256` em `totp_backup_codes` e retorna os códigos em texto claro **uma única vez**.
+- **Auth:** Bearer JWT obrigatório
+- **Request Body:**
+```json
+{
+  "code": "482910"
+}
+```
+- **Response `200 OK`:**
+```json
+{
+  "is_2fa_enabled": true,
+  "backup_codes": [
+    "7K4M-9P2X",
+    "3R8W-5N6Q",
+    "9B2V-4C7Z",
+    "6H3J-8L5D",
+    "2F7G-6K9M",
+    "8P4Q-3R7T",
+    "5V9W-2X4Y",
+    "4Z6B-7N3C"
+  ],
+  "message": "Autenticação em duas etapas ativada com sucesso. Guarde seus códigos de backup em local seguro."
+}
+```
+
+---
+
+### 4.14. `POST /api/v1/auth/2fa/disable`
+Valida a senha atual do usuário (obrigatória quando `has_password = true`) + um código TOTP de 6 dígitos (ou código de backup), desativa o 2FA e limpa `totp_secret_encrypted` e `totp_backup_codes`.
+- **Auth:** Bearer JWT obrigatório
+- **Request Body:**
+```json
+{
+  "code": "482910",
+  "password": "StrongPassword!2026"
+}
+```
+- **Response `200 OK`:**
+```json
+{
+  "message": "A autenticação em duas etapas (2FA) foi desativada com sucesso."
+}
+```
+
+---
+
+### 4.15. `POST /api/v1/auth/2fa/verify-login` (alias: `/2fa/verify`)
+Conclui o login em duas etapas validando o `challenge_token` (TTL: 5 minutos, `scope="2fa_challenge"`) e o código TOTP de 6 dígitos (ou consumindo um código de backup de uso único). Emite o `access_token` definitivo e o cookie `HttpOnly` `clipai_refresh_token`.
+- **Auth:** Público (Rate limit rigoroso: 5 req/min por IP)
+- **Request Body:**
+```json
+{
+  "challenge_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "code": "482910"
+}
+```
+- **Response `200 OK`:** Objeto `LoginResponse` completo + cookie `clipai_refresh_token`.
 
 ---
 
 ## 5. Endpoints — Usuários (`/api/v1/users`)
 
 ### 5.1. `GET /api/v1/users/me`
-Retorna os dados completos do perfil do usuário autenticado.
+Retorna os dados completos do perfil do usuário autenticado, com `display_name` (fallback automático para `username`), `avatar_url` resolvida conforme `avatar_source`, estado do vínculo Discord, status do 2FA e indicador `has_password`.
 - **Auth:** Bearer JWT obrigatório
-- **Response `200 OK`:**
+- **Response `200 OK` (`UserMeResponse`):**
 ```json
 {
   "id": "550e8400-e29b-41d4-a716-446655440000",
   "username": "fallen_br",
   "email": "gabriel@exemplo.com.br",
   "display_name": "Gabriel Toledo",
-  "avatar_url": "https://cdn.clipai.com.br/avatars/550e8400.webp",
+  "avatar_url": "https://cdn.clipai.com.br/avatars/550e8400-e29b-41d4-a716-446655440000/avatar-a1b2c3d4.webp",
+  "avatar_source": "custom",
+  "has_custom_avatar": true,
   "bio": "AWPer e criador de conteúdo.",
+  "discord_linked": true,
+  "discord_username": "fallen_disc",
+  "discord_avatar_url": "https://cdn.discordapp.com/avatars/123456789/abcdef.png?size=256",
+  "discord_linked_at": "2026-11-22T12:00:00Z",
   "is_email_verified": true,
-  "is_2fa_enabled": false,
+  "is_2fa_enabled": true,
+  "has_password": true,
   "created_at": "2026-11-21T22:00:00Z"
 }
 ```
 
 ### 5.2. `PATCH /api/v1/users/me`
-Atualiza informações de perfil do usuário autenticado.
+Atualiza `display_name` (até 50 caracteres), `bio` (até 240 caracteres) e `avatar_source` (`custom`, `discord` ou `none`) do usuário autenticado.
 - **Auth:** Bearer JWT obrigatório
 - **Request Body:**
 ```json
 {
   "display_name": "FalleN",
   "bio": "Professor do CS2.",
-  "avatar_url": "https://cdn.clipai.com.br/avatars/550e8400.webp"
+  "avatar_source": "custom"
 }
 ```
-- **Response `200 OK`:** Objeto do usuário atualizado (mesmo formato de `GET /api/v1/users/me`).
+- **Response `200 OK`:** Objeto `UserMeResponse` atualizado.
 
-### 5.3. `GET /api/v1/users/me/favorites`
+### 5.3. `POST /api/v1/users/me/avatar/upload-url`
+Valida o MIME type (`image/jpeg`, `image/png`, `image/webp`) e o tamanho máximo (`<= 5 MB`) e gera uma Presigned `PUT` URL no Cloudflare R2 na chave `avatars/{user_id}/avatar-{uuid}.{ext}`.
+- **Auth:** Bearer JWT obrigatório
+- **Request Body:**
+```json
+{
+  "mime_type": "image/webp",
+  "size_bytes": 184320
+}
+```
+- **Response `200 OK`:**
+```json
+{
+  "avatar_key": "avatars/550e8400-e29b-41d4-a716-446655440000/avatar-9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d.webp",
+  "object_key": "avatars/550e8400-e29b-41d4-a716-446655440000/avatar-9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d.webp",
+  "upload_url": "https://<account_id>.r2.cloudflarestorage.com/clipai-media/avatars/550e.../avatar-9b1d....webp?X-Amz-Algorithm=AWS4-HMAC-SHA256...",
+  "expires_in": 600,
+  "avatar_upload": {
+    "url": "https://<account_id>.r2.cloudflarestorage.com/clipai-media/avatars/550e.../avatar-9b1d....webp?X-Amz-Algorithm=AWS4-HMAC-SHA256...",
+    "method": "PUT",
+    "headers": {
+      "Content-Type": "image/webp"
+    }
+  }
+}
+```
+
+### 5.4. `POST /api/v1/users/me/avatar/confirm`
+Verifica a existência e o tamanho do objeto enviado ao Cloudflare R2 via `HeadObject`, remove o `avatar_key` anterior do R2 (se existir), atualiza `avatar_key` e define `avatar_source = "custom"`.
+- **Auth:** Bearer JWT obrigatório
+- **Request Body:**
+```json
+{
+  "avatar_key": "avatars/550e8400-e29b-41d4-a716-446655440000/avatar-9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d.webp"
+}
+```
+- **Response `200 OK`:** Objeto `UserMeResponse` atualizado.
+
+### 5.5. `DELETE /api/v1/users/me/discord`
+Desvincula a conta do Discord do perfil do usuário autenticado.
+- **Regra Crítica de Segurança:** Bloqueia com HTTP `400 PASSWORD_REQUIRED_BEFORE_UNLINK` em PT-BR caso `password_hash` seja nulo (`has_password = false`), impedindo que contas criadas via Discord fiquem sem método de login.
+- **Auth:** Bearer JWT obrigatório
+- **Response `200 OK`:** Objeto `UserMeResponse` atualizado.
+
+### 5.6. `POST /api/v1/users/me/discord/use-avatar`
+Alterna `avatar_source = "discord"` para utilizar o avatar sincronizado da conta Discord vinculada.
+- **Auth:** Bearer JWT obrigatório
+- **Response `200 OK`:** Objeto `UserMeResponse` atualizado.
+
+### 5.7. `GET /api/v1/users/me/favorites`
 Lista paginada dos clipes favoritados pelo usuário autenticado.
 - **Auth:** Bearer JWT obrigatório
 - **Query Params:** `page`, `page_size`
 - **Response `200 OK`:** Envelope paginado contendo objetos `ClipSummaryResponse`.
 
-### 5.4. `GET /api/v1/users/{username}`
-Retorna o perfil público de um usuário pelo `username`.
+### 5.8. `GET /api/v1/users/{username}`
+Retorna o perfil público de um usuário pelo `username`, incluindo `avatar_url` resolvida, indicador de vínculo com o Discord e estatísticas públicas básicas.
 - **Auth:** Público
-- **Response `200 OK`:**
+- **Response `200 OK` (`UserPublicResponse`):**
 ```json
 {
   "id": "550e8400-e29b-41d4-a716-446655440000",
   "username": "fallen_br",
   "display_name": "FalleN",
-  "avatar_url": "https://cdn.clipai.com.br/avatars/550e8400.webp",
   "bio": "Professor do CS2.",
+  "avatar_url": "https://cdn.clipai.com.br/avatars/550e8400-e29b-41d4-a716-446655440000/avatar-9b1deb4d.webp",
+  "avatar_source": "custom",
+  "discord_linked": true,
+  "discord_username": "fallen_disc",
+  "stats": {
+    "clips_count": 12,
+    "total_views": 1840,
+    "total_likes": 310,
+    "collections_count": 3
+  },
+  "clips_count": 12,
+  "total_views": 1840,
+  "total_likes": 310,
+  "collections_count": 3,
   "created_at": "2026-11-21T22:00:00Z"
 }
 ```
 
-### 5.5. `GET /api/v1/users/{username}/clips`
+### 5.9. `GET /api/v1/users/{username}/clips`
 Lista os clipes com `status = 'ready'` de um usuário. Se o solicitante for o próprio dono do perfil (autenticado via JWT), permite filtrar também seus clipes `unlisted` e `friends`; caso contrário, retorna apenas `privacy = 'public'`.
 - **Auth:** Opcional (Bearer JWT expande visibilidade para o próprio autor)
 - **Query Params:** `page`, `page_size`, `privacy` (opcional, apenas para o próprio autor)
@@ -511,7 +722,11 @@ Lista paginada de clipes (`status = 'ready'`) com suporte a busca, filtros e reg
         "id": "550e8400-e29b-41d4-a716-446655440000",
         "username": "fallen_br",
         "display_name": "FalleN",
-        "avatar_url": "https://cdn.clipai.com.br/avatars/550e8400.webp"
+        "avatar_url": "https://cdn.clipai.com.br/avatars/550e8400.webp",
+        "discord_linked": true,
+        "discord_username": "fallen_disc",
+        "is_2fa_enabled": true,
+        "has_password": true
       },
       "game": {
         "id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
