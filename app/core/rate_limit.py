@@ -133,3 +133,20 @@ async def check_clip_view_rate_limit(
         max_requests=1,
         window_seconds=window_seconds,
     )
+
+
+async def check_clip_telemetry_rate_limit(
+    *,
+    request: Request,
+    clip_id: UUID,
+    user_id: UUID | None,
+    max_requests: int = 30,
+    window_seconds: int = 60,
+) -> None:
+    """Apply lightweight rate limit to clip telemetry pings per (user or IP) + clip."""
+    actor = str(user_id) if user_id is not None else _extract_client_ip(request)
+    await rate_limiter.check(
+        f"clip_telemetry:{actor}:{clip_id}",
+        max_requests=max_requests,
+        window_seconds=window_seconds,
+    )
