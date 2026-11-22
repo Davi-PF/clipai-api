@@ -295,6 +295,31 @@ class ClipRepository:
         items_result = await self._session.execute(stmt.offset(offset).limit(page_size))
         return list(items_result.scalars().all()), total
 
+    async def list_creator_clips(
+        self,
+        user_id: UUID,
+        *,
+        q: str | None = None,
+        privacy: str | None = None,
+        game_id: UUID | None = None,
+    ) -> list[Clip]:
+        """Fetch all ready clips owned by a creator with game eager-loaded (no N+1)."""
+        stmt = (
+            select(Clip)
+            .options(selectinload(Clip.game))
+            .where(Clip.user_id == user_id, Clip.status == "ready")
+        )
+        if q and q.strip():
+            stmt = stmt.where(Clip.title.ilike(f"%{q.strip()}%"))
+        if privacy:
+            stmt = stmt.where(Clip.privacy == privacy)
+        if game_id is not None:
+            stmt = stmt.where(Clip.game_id == game_id)
+
+        stmt = stmt.order_by(Clip.created_at.desc())
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
     @classmethod
     def _build_list_filters(
         cls,

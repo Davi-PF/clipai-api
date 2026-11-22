@@ -4,6 +4,7 @@ from app.models.base import Base, TimestampMixin
 from app.models.clip import Clip, ClipFavorite, ClipLike, ClipTag, Tag
 from app.models.collection import Collection, CollectionClip
 from app.models.game import Game
+from app.models.telemetry import ClipWatchSession
 from app.models.user import RefreshToken, User
 
 __all__ = [
@@ -12,6 +13,7 @@ __all__ = [
     "ClipFavorite",
     "ClipLike",
     "ClipTag",
+    "ClipWatchSession",
     "Collection",
     "CollectionClip",
     "Game",

@@ -9,7 +9,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings, get_settings
 from app.core.database import get_db
 from app.core.dependencies import get_current_user, get_optional_user, get_verified_user
-from app.core.rate_limit import check_clip_view_rate_limit, check_user_rate_limit
+from app.core.rate_limit import (
+    check_clip_telemetry_rate_limit,
+    check_clip_view_rate_limit,
+    check_user_rate_limit,
+)
 from app.models.user import User
 from app.schemas.clip import (
     ClipDetailResponse,
@@ -22,8 +26,10 @@ from app.schemas.clip import (
     UploadUrlResponse,
 )
 from app.schemas.common import PaginatedResponse
+from app.schemas.telemetry import ClipTelemetryRequest, ClipTelemetryResponse
 from app.services.clip_service import ClipService
 from app.services.storage_service import StorageService
+from app.services.telemetry_service import TelemetryService
 
 router = APIRouter(prefix="/clips", tags=["Clips"])
 
@@ -40,6 +46,13 @@ def get_clip_service(
 ) -> ClipService:
     """Provide ClipService dependency."""
     return ClipService(session=session, settings=settings, storage_service=storage_service)
+
+
+def get_telemetry_service(
+    session: AsyncSession = Depends(get_db),
+) -> TelemetryService:
+    """Provide TelemetryService dependency."""
+    return TelemetryService(session=session)
 
 
 @router.post(
@@ -267,3 +280,28 @@ async def register_clip_view_alias(
         user_id=current_user.id if current_user else None,
     )
     return await clip_service.register_view(clip_id, current_user)
+
+
+@router.post(
+    "/{clip_id}/telemetry",
+    response_model=ClipTelemetryResponse,
+    summary="Registra ou atualiza telemetria de retenção de visualização do clipe",
+)
+async def record_clip_telemetry(
+    clip_id: UUID,
+    payload: ClipTelemetryRequest,
+    request: Request,
+    current_user: User | None = Depends(get_optional_user),
+    telemetry_service: TelemetryService = Depends(get_telemetry_service),
+) -> ClipTelemetryResponse:
+    """Idempotently upsert a viewer watch session with retention checkpoints."""
+    await check_clip_telemetry_rate_limit(
+        request=request,
+        clip_id=clip_id,
+        user_id=current_user.id if current_user else None,
+    )
+    return await telemetry_service.record_telemetry(
+        clip_id,
+        payload,
+        current_user=current_user,
+    )
