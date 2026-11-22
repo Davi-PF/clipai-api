@@ -2,11 +2,13 @@
 
 import re
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.schemas.clip import ClipPrivacy
+from app.schemas.user import enrich_user_payload
 
 _HEX_COLOR_PATTERN = re.compile(r"^#[0-9A-Fa-f]{6}$")
 
@@ -101,7 +103,15 @@ class CollectionOwnerSummary(BaseModel):
 
     id: UUID
     username: str
-    display_name: str | None
+    display_name: str
+    avatar_url: str | None = None
+    discord_linked: bool = False
+    discord_username: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve_owner_fields(cls, data: Any) -> dict[str, Any]:
+        return enrich_user_payload(data)
 
 
 class CollectionSummaryResponse(BaseModel):

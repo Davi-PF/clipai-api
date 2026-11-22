@@ -75,6 +75,18 @@ class StorageService:
             )
         return f"clips/{user_id}/{clip_id}/thumb.{extension}"
 
+    @staticmethod
+    def build_avatar_key(user_id: UUID, avatar_uuid: UUID, mime_type: str) -> str:
+        """Build deterministic R2 object key for a custom user avatar."""
+        extension = _THUMBNAIL_EXTENSION_BY_MIME.get(mime_type)
+        if extension is None:
+            raise AppError(
+                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                code="UNSUPPORTED_MEDIA_TYPE",
+                message="Formato de imagem de avatar não suportado. Use JPEG, PNG ou WebP.",
+            )
+        return f"avatars/{user_id}/avatar-{avatar_uuid}.{extension}"
+
     async def generate_presigned_upload_url(
         self,
         object_key: str,

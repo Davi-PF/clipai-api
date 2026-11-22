@@ -1,10 +1,12 @@
 """Pydantic v2 schemas for clip upload, detail, listing, and editing."""
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from app.schemas.user import enrich_user_payload
 
 ClipPrivacy = Literal["public", "friends", "unlisted"]
 ClipStatus = Literal["pending_upload", "ready", "failed"]
@@ -99,8 +101,17 @@ class ClipAuthorSummary(BaseModel):
 
     id: UUID
     username: str
-    display_name: str | None
-    avatar_url: str | None
+    display_name: str
+    avatar_url: str | None = None
+    discord_linked: bool = False
+    discord_username: str | None = None
+    is_2fa_enabled: bool = False
+    has_password: bool = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve_author_fields(cls, data: Any) -> dict[str, Any]:
+        return enrich_user_payload(data)
 
 
 class ClipGameSummary(BaseModel):
