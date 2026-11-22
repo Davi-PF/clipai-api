@@ -88,3 +88,40 @@ def test_get_settings_returns_cached_instance() -> None:
     second = get_settings()
 
     assert first is second
+
+
+def test_settings_cookie_secure_follows_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Derive cookie_secure from ENVIRONMENT=production unless explicitly overridden."""
+    monkeypatch.delenv("APP_ENV", raising=False)
+    env = _valid_env_overrides()
+    env["ENVIRONMENT"] = "development"
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    dev_settings = Settings(_env_file=None)
+    assert dev_settings.app_env == "development"
+    assert dev_settings.cookie_secure is False
+
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    prod_settings = Settings(_env_file=None)
+    assert prod_settings.is_production is True
+    assert prod_settings.cookie_secure is True
+
+    monkeypatch.setenv("REFRESH_COOKIE_SECURE", "false")
+    overridden = Settings(_env_file=None)
+    assert overridden.cookie_secure is False
+
+
+def test_settings_requires_resend_api_key_in_production(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail fast in production when RESEND_API_KEY is missing or blank."""
+    monkeypatch.delenv("APP_ENV", raising=False)
+    env = _valid_env_overrides()
+    env["ENVIRONMENT"] = "production"
+    env["RESEND_API_KEY"] = "  "
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    with pytest.raises(ValidationError, match="RESEND_API_KEY is required"):
+        Settings(_env_file=None)

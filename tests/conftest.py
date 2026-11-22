@@ -32,7 +32,14 @@ _bootstrap_test_environment()
 
 from app.core.config import Settings, get_settings  # noqa: E402
 from app.core.database import get_db  # noqa: E402
+from app.core.rate_limit import rate_limiter  # noqa: E402
 from app.main import create_app  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def reset_rate_limiter() -> None:
+    """Clear in-memory rate-limit buckets before each test."""
+    rate_limiter.reset()
 
 
 @pytest.fixture
