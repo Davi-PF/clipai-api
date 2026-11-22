@@ -55,7 +55,6 @@ clipai-api/
 │   │   ├── exceptions.py           # Exceções de domínio e handler padronizado PT-BR
 │   │   ├── rate_limit.py           # Rate limiter para rotas sensíveis
 │   │   ├── r2_client.py            # Wrapper assíncrono sobre boto3 para Cloudflare R2
-│   │   ├── email_client.py         # Cliente de envio transacional via Resend
 │   │   └── security.py             # Argon2id, JWT (access/verify/reset), SHA-256 e Fernet (2FA)
 │   ├── models/
 │   │   ├── __init__.py             # Exporta todos os models para autogenerate do Alembic
@@ -83,6 +82,7 @@ clipai-api/
 │   ├── services/
 │   │   ├── __init__.py
 │   │   ├── auth_service.py
+│   │   ├── email_service.py
 │   │   ├── user_service.py
 │   │   ├── clip_service.py
 │   │   └── collection_service.py
@@ -148,10 +148,10 @@ clipai-api/
 - **Entrega Pública (Leitura):** Os vídeos e thumbnails com `status = 'ready'` são servidos através do domínio público customizado do bucket R2 (`R2_PUBLIC_BASE_URL`, ex.: `https://cdn.clipai.com.br/{object_key}`), aproveitando o cache de borda da Cloudflare sem custo de egress.
 
 ### 5.2. Resend (E-mail Transacional)
-- O módulo `app/core/email_client.py` realiza chamadas HTTP assíncronas (ou via SDK oficial encapsulado com `asyncio.to_thread`) para a API do **Resend**.
+- O módulo `app/services/email_service.py` realiza chamadas HTTP assíncronas via `httpx.AsyncClient` para a API do **Resend**.
 - **Templates Transacionais do MVP (em PT-BR):**
-  1. **Confirmação de Conta:** Link `https://<FRONTEND_URL>/verificar-email?token=<jwt_verify_token>` (TTL: 24h).
-  2. **Recuperação de Senha:** Link `https://<FRONTEND_URL>/redefinir-senha?token=<jwt_reset_token>` (TTL: 30min).
+  1. **Confirmação de Conta:** Link `https://<FRONTEND_URL>/verify-email?token=<jwt_verify_token>` (TTL: 24h).
+  2. **Recuperação de Senha:** Link `https://<FRONTEND_URL>/reset-password?token=<jwt_reset_token>` (TTL: 30min).
 
 ---
 
@@ -217,7 +217,7 @@ MAX_THUMBNAIL_SIZE_BYTES=5242880       # 5 MB
 # RESEND (Transactional Email)
 # ==============================================================================
 RESEND_API_KEY="re_xxxxxxxxx"
-EMAIL_FROM_ADDRESS="CLIPAÍ <noreply@clipai.com.br>"
+EMAIL_FROM_ADDRESS="CLIPAÍ <onboarding@resend.dev>" # Trocar para noreply@clipai.com.br após verificar domínio
 ```
 
 ---

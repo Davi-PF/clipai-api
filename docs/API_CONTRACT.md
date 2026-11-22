@@ -289,6 +289,13 @@ Redefine a senha do usuário usando o token recebido por e-mail e revoga todas a
 
 ---
 
+### 4.9. `GET /api/v1/auth/me`
+Retorna os dados do perfil do usuário autenticado (mesmo contrato de `GET /api/v1/users/me`).
+- **Auth:** Bearer JWT obrigatório
+- **Response `200 OK`:** Objeto `UserMeResponse`.
+
+---
+
 ## 5. Endpoints — Usuários (`/api/v1/users`)
 
 ### 5.1. `GET /api/v1/users/me`
