@@ -3,7 +3,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -20,7 +20,10 @@ class Settings(BaseSettings):
     # Application & Environment
     app_name: str = "clipai-api"
     app_version: str = "1.0.0"
-    app_env: Literal["development", "staging", "production"] = "development"
+    app_env: Literal["development", "staging", "production"] = Field(
+        default="development",
+        validation_alias=AliasChoices("APP_ENV", "ENVIRONMENT"),
+    )
     app_debug: bool = False
     api_v1_prefix: str = "/api/v1"
     frontend_url: str = "http://localhost:3000"
@@ -43,7 +46,7 @@ class Settings(BaseSettings):
 
     # Refresh Token Cookie
     refresh_cookie_name: str = "clipai_refresh_token"
-    refresh_cookie_secure: bool = True
+    refresh_cookie_secure: bool | None = None
     refresh_cookie_samesite: Literal["lax", "strict"] = "lax"
     refresh_cookie_domain: str = ""
 
@@ -65,8 +68,30 @@ class Settings(BaseSettings):
     max_thumbnail_size_bytes: int = Field(default=5_242_880, ge=1)
 
     # Resend (Transactional Email)
-    resend_api_key: SecretStr
-    email_from_address: str = "CLIPAÍ <noreply@clipai.com.br>"
+    resend_api_key: SecretStr | None = None
+    email_from_address: str = "CLIPAÍ <onboarding@resend.dev>"
+
+    @model_validator(mode="after")
+    def validate_production_requirements(self) -> "Settings":
+        """Require critical external credentials in production environments."""
+        if self.app_env == "production" and (
+            self.resend_api_key is None or not self.resend_api_key.get_secret_value().strip()
+        ):
+            msg = "RESEND_API_KEY is required when APP_ENV/ENVIRONMENT is 'production'."
+            raise ValueError(msg)
+        return self
+
+    @property
+    def is_production(self) -> bool:
+        """Return True when running in production environment."""
+        return self.app_env == "production"
+
+    @property
+    def cookie_secure(self) -> bool:
+        """Resolve Secure attribute for cookies based on explicit override or environment."""
+        if self.refresh_cookie_secure is not None:
+            return self.refresh_cookie_secure
+        return self.is_production
 
     @field_validator("database_url")
     @classmethod

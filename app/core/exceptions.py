@@ -47,12 +47,14 @@ class AppError(Exception):
         code: str,
         message: str,
         details: list[ErrorDetailItem] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.code = code
         self.message = message
         self.details = details or []
+        self.headers = headers
 
 
 def _resolve_request_id(request: Request) -> str:
@@ -68,6 +70,7 @@ def _build_error_response(
     code: str,
     message: str,
     details: list[ErrorDetailItem] | None = None,
+    headers: dict[str, str] | None = None,
 ) -> JSONResponse:
     """Serialize an error payload compliant with docs/API_CONTRACT.md."""
     payload = ErrorResponse(
@@ -78,7 +81,7 @@ def _build_error_response(
             request_id=_resolve_request_id(request),
         )
     )
-    return JSONResponse(status_code=status_code, content=payload.model_dump())
+    return JSONResponse(status_code=status_code, content=payload.model_dump(), headers=headers)
 
 
 def register_exception_handlers(app: FastAPI) -> None:
@@ -92,6 +95,7 @@ def register_exception_handlers(app: FastAPI) -> None:
             code=exc.code,
             message=exc.message,
             details=exc.details,
+            headers=exc.headers,
         )
 
     @app.exception_handler(RequestValidationError)
@@ -102,7 +106,7 @@ def register_exception_handlers(app: FastAPI) -> None:
         details = [
             ErrorDetailItem(
                 field=".".join(str(part) for part in err["loc"] if part != "body"),
-                message=str(err["msg"]),
+                message=str(err["msg"]).removeprefix("Value error, "),
             )
             for err in exc.errors()
         ]
