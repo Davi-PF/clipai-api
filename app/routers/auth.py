@@ -19,6 +19,11 @@ from app.schemas.auth import (
     RegisterResponse,
     ResendVerificationRequest,
     ResetPasswordRequest,
+    TwoFactorDisableRequest,
+    TwoFactorEnableRequest,
+    TwoFactorEnableResponse,
+    TwoFactorSetupResponse,
+    TwoFactorVerifyLoginRequest,
     VerifyEmailRequest,
 )
 from app.schemas.user import UserMeResponse
@@ -150,7 +155,7 @@ async def resend_verification(
             )
         )
     ],
-    summary="Autentica usuário e define cookie HttpOnly de refresh token",
+    summary="Autentica usuário e define cookie HttpOnly de refresh token (ou desafio 2FA)",
 )
 async def login(
     payload: LoginRequest,
@@ -159,9 +164,97 @@ async def login(
     auth_service: AuthService = Depends(get_auth_service),
     settings: Settings = Depends(get_settings),
 ) -> LoginResponse:
-    """Authenticate user credentials and issue tokens."""
+    """Authenticate user credentials and issue tokens or 2FA challenge."""
     user_agent, ip_address = _extract_request_metadata(request)
     login_response, raw_refresh_token = await auth_service.login(
+        payload,
+        user_agent=user_agent,
+        ip_address=ip_address,
+    )
+    if raw_refresh_token is not None:
+        _set_refresh_cookie(response, raw_refresh_token, settings)
+    return login_response
+
+
+@router.post(
+    "/2fa/setup",
+    response_model=TwoFactorSetupResponse,
+    summary="Gera segredo Base32 criptografado com Fernet e URI otpauth para 2FA TOTP",
+)
+async def setup_two_factor(
+    current_user: User = Depends(get_current_user),
+    auth_service: AuthService = Depends(get_auth_service),
+) -> TwoFactorSetupResponse:
+    """Initialize 2FA TOTP configuration for the authenticated user."""
+    return await auth_service.setup_2fa(current_user)
+
+
+@router.post(
+    "/2fa/enable",
+    response_model=TwoFactorEnableResponse,
+    summary="Valida código TOTP de 6 dígitos, ativa o 2FA e gera 8 códigos de backup",
+)
+async def enable_two_factor(
+    payload: TwoFactorEnableRequest,
+    current_user: User = Depends(get_current_user),
+    auth_service: AuthService = Depends(get_auth_service),
+) -> TwoFactorEnableResponse:
+    """Confirm TOTP setup and activate 2FA with one-time backup codes."""
+    return await auth_service.enable_2fa(current_user, payload)
+
+
+@router.post(
+    "/2fa/disable",
+    response_model=MessageResponse,
+    summary="Valida senha atual e código TOTP/backup para desativar o 2FA",
+)
+async def disable_two_factor(
+    payload: TwoFactorDisableRequest,
+    current_user: User = Depends(get_current_user),
+    auth_service: AuthService = Depends(get_auth_service),
+) -> MessageResponse:
+    """Disable 2FA and purge stored TOTP secret and backup codes."""
+    return await auth_service.disable_2fa(current_user, payload)
+
+
+@router.post(
+    "/2fa/verify-login",
+    response_model=LoginResponse,
+    dependencies=[
+        Depends(
+            rate_limit(
+                scope="auth_2fa_verify",
+                max_requests=5,
+                window_seconds=60,
+            )
+        )
+    ],
+    summary="Valida desafio 2FA (TOTP ou código de backup) e emite sessão autenticada",
+)
+@router.post(
+    "/2fa/verify",
+    response_model=LoginResponse,
+    include_in_schema=False,
+    dependencies=[
+        Depends(
+            rate_limit(
+                scope="auth_2fa_verify",
+                max_requests=5,
+                window_seconds=60,
+            )
+        )
+    ],
+)
+async def verify_two_factor_login(
+    payload: TwoFactorVerifyLoginRequest,
+    request: Request,
+    response: Response,
+    auth_service: AuthService = Depends(get_auth_service),
+    settings: Settings = Depends(get_settings),
+) -> LoginResponse:
+    """Complete 2FA login challenge and issue access token + refresh cookie."""
+    user_agent, ip_address = _extract_request_metadata(request)
+    login_response, raw_refresh_token = await auth_service.verify_2fa_login(
         payload,
         user_agent=user_agent,
         ip_address=ip_address,

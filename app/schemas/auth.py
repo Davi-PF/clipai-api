@@ -3,7 +3,7 @@
 import re
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from app.schemas.user import UserAuthSummary, UserRegisteredResponse
 
@@ -106,16 +106,79 @@ class LoginRequest(BaseModel):
 
 
 class LoginResponse(BaseModel):
-    """Response for POST /api/v1/auth/login (with reserved 2FA fields)."""
+    """Response for POST /api/v1/auth/login, /auth/discord/callback, and /auth/2fa/verify-login."""
 
     model_config = ConfigDict(from_attributes=True)
 
-    access_token: str | None
+    access_token: str | None = None
     token_type: Literal["bearer"] = Field(default="bearer")
-    expires_in: int
+    expires_in: int = 900
     requires_2fa: bool = False
+    challenge_token: str | None = None
     temp_2fa_token: str | None = None
-    user: UserAuthSummary
+    user: UserAuthSummary | None = None
+
+
+class TwoFactorSetupResponse(BaseModel):
+    """Response for POST /api/v1/auth/2fa/setup."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    otpauth_uri: str
+    manual_secret: str
+    secret: str
+    issuer: str = "CLIPAÍ"
+
+
+class TwoFactorEnableRequest(BaseModel):
+    """Payload for POST /api/v1/auth/2fa/enable."""
+
+    code: str = Field(min_length=6, max_length=16)
+
+    @field_validator("code")
+    @classmethod
+    def strip_code(cls, value: str) -> str:
+        """Trim whitespace from TOTP code."""
+        return value.strip()
+
+
+class TwoFactorEnableResponse(BaseModel):
+    """Response for POST /api/v1/auth/2fa/enable with single-display backup codes."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    is_2fa_enabled: bool = True
+    backup_codes: list[str]
+    message: str
+
+
+class TwoFactorDisableRequest(BaseModel):
+    """Payload for POST /api/v1/auth/2fa/disable."""
+
+    code: str = Field(min_length=6, max_length=32)
+    password: str | None = Field(default=None, max_length=128)
+
+    @field_validator("code")
+    @classmethod
+    def strip_code(cls, value: str) -> str:
+        """Trim whitespace from TOTP or backup code."""
+        return value.strip()
+
+
+class TwoFactorVerifyLoginRequest(BaseModel):
+    """Payload for POST /api/v1/auth/2fa/verify-login."""
+
+    challenge_token: str = Field(
+        min_length=1,
+        validation_alias=AliasChoices("challenge_token", "temp_2fa_token"),
+    )
+    code: str = Field(min_length=6, max_length=32)
+
+    @field_validator("code")
+    @classmethod
+    def strip_code(cls, value: str) -> str:
+        """Trim whitespace from TOTP or backup code."""
+        return value.strip()
 
 
 class RefreshResponse(BaseModel):
