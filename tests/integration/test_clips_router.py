@@ -169,6 +169,20 @@ class _FakeClipRepo:
     async def delete(self, clip: Clip) -> None:
         self._store.clips.pop(clip.id, None)
 
+    async def get_user_liked_clip_ids(
+        self,
+        _user_id: UUID,
+        _clip_ids: list[UUID],
+    ) -> set[UUID]:
+        return set()
+
+    async def get_user_favorited_clip_ids(
+        self,
+        _user_id: UUID,
+        _clip_ids: list[UUID],
+    ) -> set[UUID]:
+        return set()
+
     async def list_clips(
         self,
         *,
@@ -178,11 +192,14 @@ class _FakeClipRepo:
         tag_slug: str | None = None,
         author_username: str | None = None,
         mine: bool = False,
+        favorited_by_user_id: UUID | None = None,
+        collection_id: UUID | None = None,
         current_user_id: UUID | None = None,
         sort: str = "recent",
         page: int = 1,
         page_size: int = 20,
     ) -> tuple[list[Clip], int]:
+        _ = (favorited_by_user_id, collection_id)
         clips = [c for c in self._store.clips.values() if c.status == "ready"]
         clips = self._filter_visibility(clips, mine=mine, current_user_id=current_user_id)
         clips = self._filter_metadata(
