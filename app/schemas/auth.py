@@ -216,6 +216,37 @@ class ResetPasswordRequest(BaseModel):
         return _validate_password_strength(value)
 
 
+DiscordAuthMode = Literal["login", "link"]
+
+
+class DiscordAuthUrlResponse(BaseModel):
+    """Response for GET /api/v1/auth/discord/url."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    url: str
+    authorization_url: str
+    state: str
+    mode: DiscordAuthMode
+
+
+class DiscordCallbackRequest(BaseModel):
+    """Payload for POST /api/v1/auth/discord/callback."""
+
+    code: str = Field(min_length=1)
+    state: str = Field(min_length=1)
+
+
+class DiscordCallbackResponse(LoginResponse):
+    """Response for POST /api/v1/auth/discord/callback (supports both login and link modes)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    mode: DiscordAuthMode = "login"
+    linked: bool = True
+    message: str | None = None
+
+
 class MessageResponse(BaseModel):
     """Generic PT-BR confirmation message envelope."""
 

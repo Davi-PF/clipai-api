@@ -95,6 +95,32 @@ async def confirm_avatar_upload(
     return await user_service.confirm_avatar_upload(current_user, payload)
 
 
+@router.delete(
+    "/me/discord",
+    response_model=UserMeResponse,
+    summary="Desvincula a conta do Discord (exige senha local configurada)",
+)
+async def unlink_discord_account(
+    current_user: User = Depends(get_current_user),
+    user_service: UserService = Depends(get_user_service),
+) -> UserMeResponse:
+    """Unlink Discord identity from the authenticated user account."""
+    return await user_service.unlink_discord(current_user)
+
+
+@router.post(
+    "/me/discord/use-avatar",
+    response_model=UserMeResponse,
+    summary="Alterna a origem do avatar para o avatar do Discord vinculado",
+)
+async def use_discord_avatar(
+    current_user: User = Depends(get_current_user),
+    user_service: UserService = Depends(get_user_service),
+) -> UserMeResponse:
+    """Activate the linked Discord avatar as the user's primary avatar_source."""
+    return await user_service.use_discord_avatar(current_user)
+
+
 @router.get(
     "/me/favorites",
     response_model=PaginatedResponse[ClipSummaryResponse],

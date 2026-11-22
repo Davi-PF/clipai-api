@@ -158,6 +158,54 @@ def create_2fa_challenge_token(user_id: UUID, settings: Settings) -> str:
     )
 
 
+def create_discord_state_token(
+    *,
+    mode: str,
+    user_id: UUID | None,
+    settings: Settings,
+) -> str:
+    """Create short-lived (10 min) signed OAuth2 state JWT for Discord CSRF protection."""
+    subject = str(user_id) if user_id is not None else "anonymous"
+    return create_jwt_token(
+        subject=subject,
+        token_type=TokenType.DISCORD_OAUTH_STATE,
+        expires_delta=timedelta(minutes=10),
+        settings=settings,
+        extra_claims={
+            "mode": mode,
+            "user_id": str(user_id) if user_id is not None else None,
+        },
+    )
+
+
+def decode_discord_state_token(state: str, *, settings: Settings) -> dict[str, Any]:
+    """Decode and validate a Discord OAuth2 state JWT."""
+    payload = decode_jwt_token(
+        state,
+        expected_type=TokenType.DISCORD_OAUTH_STATE,
+        settings=settings,
+        invalid_status_code=status.HTTP_400_BAD_REQUEST,
+    )
+    mode = payload.get("mode")
+    if mode not in ("login", "link"):
+        raise AppError(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code="INVALID_TOKEN",
+            message="Estado de autorização do Discord inválido.",
+        )
+    if mode == "link":
+        raw_user_id = payload.get("user_id")
+        try:
+            UUID(str(raw_user_id))
+        except (ValueError, TypeError) as exc:
+            raise AppError(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                code="INVALID_TOKEN",
+                message="Estado de vinculação do Discord inválido.",
+            ) from exc
+    return payload
+
+
 def decode_2fa_challenge_token(token: str, *, settings: Settings) -> dict[str, Any]:
     """Decode and validate a 5-minute 2FA login challenge JWT."""
     try:

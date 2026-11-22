@@ -177,6 +177,56 @@ class UserService:
             created_at=user.created_at,
         )
 
+    async def unlink_discord(self, current_user: User) -> UserMeResponse:
+        """Unlink Discord account, blocking with HTTP 400 if the user has no local password."""
+        if not current_user.discord_id:
+            raise AppError(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                code="BAD_REQUEST",
+                message="Nenhuma conta do Discord está vinculada ao seu perfil.",
+            )
+        if not current_user.password_hash:
+            raise AppError(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                code="PASSWORD_REQUIRED_BEFORE_UNLINK",
+                message=(
+                    "Você não possui uma senha cadastrada. Defina uma senha antes de "
+                    "desvincular o Discord para não perder o acesso à sua conta."
+                ),
+            )
+
+        current_user.discord_id = None
+        current_user.discord_username = None
+        current_user.discord_avatar_url = None
+        current_user.discord_linked_at = None
+
+        if current_user.avatar_source == "discord":
+            if current_user.avatar_key:
+                current_user.avatar_source = "custom"
+                current_user.avatar_url = self._storage.build_public_url(current_user.avatar_key)
+            else:
+                current_user.avatar_source = "none"
+                current_user.avatar_url = None
+
+        await self._user_repo.save(current_user)
+        await self._session.commit()
+        return UserMeResponse.model_validate(current_user)
+
+    async def use_discord_avatar(self, current_user: User) -> UserMeResponse:
+        """Switch avatar_source to 'discord' when a Discord account is linked."""
+        if not current_user.discord_id:
+            raise AppError(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                code="BAD_REQUEST",
+                message="Sua conta do Discord não está vinculada.",
+            )
+
+        current_user.avatar_source = "discord"
+        current_user.avatar_url = current_user.discord_avatar_url
+        await self._user_repo.save(current_user)
+        await self._session.commit()
+        return UserMeResponse.model_validate(current_user)
+
     @staticmethod
     def _validate_avatar_source_transition(user: User, target_source: str) -> None:
         if target_source == "custom" and not user.avatar_key:

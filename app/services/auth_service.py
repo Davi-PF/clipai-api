@@ -1,6 +1,9 @@
 """Authentication business logic service."""
 
+import re
+import secrets
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID, uuid4
 
 from fastapi import status
@@ -14,9 +17,11 @@ from app.core.security import (
     compute_password_fingerprint,
     create_2fa_challenge_token,
     create_access_token,
+    create_discord_state_token,
     create_email_verification_token,
     create_password_reset_token,
     decode_2fa_challenge_token,
+    decode_discord_state_token,
     decode_jwt_token,
     decrypt_totp_secret,
     encrypt_totp_secret,
@@ -35,6 +40,10 @@ from app.models.user import User
 from app.repositories.refresh_token_repository import RefreshTokenRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.auth import (
+    DiscordAuthMode,
+    DiscordAuthUrlResponse,
+    DiscordCallbackRequest,
+    DiscordCallbackResponse,
     LoginRequest,
     LoginResponse,
     MessageResponse,
@@ -49,21 +58,24 @@ from app.schemas.auth import (
     TwoFactorVerifyLoginRequest,
 )
 from app.schemas.user import UserAuthSummary, UserRegisteredResponse
+from app.services.discord_service import DiscordOAuthService, DiscordUserProfile
 from app.services.email_service import EmailService
 
 
 class AuthService:
-    """Orchestrates registration, verification, login, token rotation, and password resets."""
+    """Orchestrates registration, verification, login, Discord OAuth2, 2FA, and password resets."""
 
     def __init__(
         self,
         session: AsyncSession,
         settings: Settings,
         email_service: EmailService,
+        discord_service: DiscordOAuthService | None = None,
     ) -> None:
         self._session = session
         self._settings = settings
         self._email_service = email_service
+        self._discord_service = discord_service or DiscordOAuthService(settings)
         self._user_repo = UserRepository(session)
         self._refresh_repo = RefreshTokenRepository(session)
 
@@ -321,6 +333,238 @@ class AuthService:
             user_agent=user_agent,
             ip_address=ip_address,
         )
+
+    def get_discord_auth_url(
+        self,
+        *,
+        mode: DiscordAuthMode,
+        current_user: User | None,
+    ) -> DiscordAuthUrlResponse:
+        """Generate official Discord OAuth2 authorization URL with signed CSRF state JWT."""
+        if mode == "link":
+            if current_user is None:
+                raise AppError(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    code="INVALID_TOKEN",
+                    message="Faça login para vincular sua conta do Discord.",
+                )
+            user_id: UUID | None = current_user.id
+        else:
+            user_id = None
+
+        state = create_discord_state_token(
+            mode=mode,
+            user_id=user_id,
+            settings=self._settings,
+        )
+        url = self._discord_service.build_authorization_url(state=state)
+        return DiscordAuthUrlResponse(
+            url=url,
+            authorization_url=url,
+            state=state,
+            mode=mode,
+        )
+
+    async def handle_discord_callback(
+        self,
+        payload: DiscordCallbackRequest,
+        *,
+        current_user: User | None,
+        user_agent: str | None,
+        ip_address: str | None,
+    ) -> tuple[DiscordCallbackResponse, str | None]:
+        """Process Discord OAuth2 callback in 'link' or 'login' mode."""
+        state_payload = decode_discord_state_token(payload.state, settings=self._settings)
+        mode: DiscordAuthMode = state_payload["mode"]
+        profile = await self._discord_service.exchange_code_for_profile(payload.code)
+
+        if mode == "link":
+            response = await self._handle_discord_link(
+                state_payload,
+                profile,
+                current_user=current_user,
+            )
+            return response, None
+
+        return await self._handle_discord_login(
+            profile,
+            user_agent=user_agent,
+            ip_address=ip_address,
+        )
+
+    async def _handle_discord_link(
+        self,
+        state_payload: dict[str, Any],
+        profile: DiscordUserProfile,
+        *,
+        current_user: User | None,
+    ) -> DiscordCallbackResponse:
+        """Link Discord account to an existing authenticated user."""
+        user = await self._resolve_user_from_sub(
+            state_payload["user_id"],
+            invalid_status_code=status.HTTP_401_UNAUTHORIZED,
+        )
+        if current_user is not None and current_user.id != user.id:
+            raise AppError(
+                status_code=status.HTTP_403_FORBIDDEN,
+                code="FORBIDDEN",
+                message="O estado de vinculação do Discord pertence a outro usuário.",
+            )
+
+        existing_owner = await self._user_repo.get_by_discord_id(profile.discord_id)
+        if existing_owner is not None and existing_owner.id != user.id:
+            raise AppError(
+                status_code=status.HTTP_409_CONFLICT,
+                code="CONFLICT",
+                message="Esta conta do Discord já está vinculada a outro usuário.",
+            )
+
+        self._apply_discord_link(user, profile)
+        await self._user_repo.save(user)
+        await self._session.commit()
+
+        return DiscordCallbackResponse(
+            access_token=None,
+            expires_in=0,
+            requires_2fa=False,
+            challenge_token=None,
+            temp_2fa_token=None,
+            user=UserAuthSummary.model_validate(user),
+            mode="link",
+            linked=True,
+            message="Conta do Discord vinculada com sucesso.",
+        )
+
+    async def _handle_discord_login(
+        self,
+        profile: DiscordUserProfile,
+        *,
+        user_agent: str | None,
+        ip_address: str | None,
+    ) -> tuple[DiscordCallbackResponse, str | None]:
+        """Authenticate, auto-link verified account, or provision a new Discord user."""
+        user = await self._user_repo.get_by_discord_id(profile.discord_id)
+        if user is not None:
+            if not user.is_active:
+                raise AppError(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    code="FORBIDDEN",
+                    message="Esta conta de usuário está desativada.",
+                )
+            user.discord_username = profile.username
+            user.discord_avatar_url = profile.avatar_url
+            if user.avatar_source == "discord":
+                user.avatar_url = profile.avatar_url
+            await self._user_repo.save(user)
+        else:
+            user = await self._resolve_or_create_discord_user(profile)
+
+        login_resp, raw_refresh = await self._issue_login_or_2fa_challenge(
+            user,
+            user_agent=user_agent,
+            ip_address=ip_address,
+        )
+        return (
+            DiscordCallbackResponse(
+                **login_resp.model_dump(),
+                mode="login",
+                linked=True,
+                message="Autenticação via Discord realizada com sucesso.",
+            ),
+            raw_refresh,
+        )
+
+    async def _resolve_or_create_discord_user(self, profile: DiscordUserProfile) -> User:
+        """Auto-link an existing verified account by email or create a new user."""
+        if not profile.email:
+            raise AppError(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                code="BAD_REQUEST",
+                message="Sua conta do Discord não forneceu um endereço de e-mail válido.",
+            )
+
+        existing_email_user = await self._user_repo.get_by_email(profile.email)
+        if existing_email_user is not None:
+            if not existing_email_user.is_active:
+                raise AppError(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    code="FORBIDDEN",
+                    message="Esta conta de usuário está desativada.",
+                )
+            if profile.email_verified and existing_email_user.is_email_verified:
+                if (
+                    existing_email_user.discord_id
+                    and existing_email_user.discord_id != profile.discord_id
+                ):
+                    raise AppError(
+                        status_code=status.HTTP_409_CONFLICT,
+                        code="CONFLICT",
+                        message=(
+                            "A conta associada a este e-mail já possui outro Discord vinculado."
+                        ),
+                    )
+                self._apply_discord_link(existing_email_user, profile)
+                await self._user_repo.save(existing_email_user)
+                return existing_email_user
+
+            # When automatic link is not safe (unverified email), create a new account
+            # or reject email collision safely
+            unique_username = await self._generate_unique_discord_username(profile.username)
+            scoped_email = f"discord_{profile.discord_id}+{profile.email}"
+            return await self._user_repo.create(
+                username=unique_username,
+                email=scoped_email,
+                password_hash=None,
+                display_name=profile.display_name,
+                is_email_verified=profile.email_verified,
+                avatar_source="discord",
+                discord_id=profile.discord_id,
+                discord_username=profile.username,
+                discord_avatar_url=profile.avatar_url,
+                discord_linked_at=datetime.now(UTC),
+            )
+
+        unique_username = await self._generate_unique_discord_username(profile.username)
+        return await self._user_repo.create(
+            username=unique_username,
+            email=profile.email,
+            password_hash=None,
+            display_name=profile.display_name,
+            is_email_verified=profile.email_verified,
+            avatar_source="discord",
+            discord_id=profile.discord_id,
+            discord_username=profile.username,
+            discord_avatar_url=profile.avatar_url,
+            discord_linked_at=datetime.now(UTC),
+        )
+
+    @staticmethod
+    def _apply_discord_link(user: User, profile: DiscordUserProfile) -> None:
+        """Populate Discord fields on User and default avatar_source to discord when no custom."""
+        user.discord_id = profile.discord_id
+        user.discord_username = profile.username
+        user.discord_avatar_url = profile.avatar_url
+        user.discord_linked_at = datetime.now(UTC)
+        if not user.avatar_key and user.avatar_source != "custom":
+            user.avatar_source = "discord"
+            user.avatar_url = profile.avatar_url
+
+    async def _generate_unique_discord_username(self, raw_username: str) -> str:
+        """Normalize Discord username to ^[a-zA-Z0-9_]{3,30}$ and ensure uniqueness."""
+        normalized = re.sub(r"[^a-zA-Z0-9_]", "_", raw_username.strip().lower())
+        normalized = re.sub(r"_+", "_", normalized).strip("_")
+        if len(normalized) < 3:
+            normalized = f"user_{normalized or 'player'}"
+
+        base = normalized[:24]
+        if await self._user_repo.get_by_username(base) is None:
+            return base
+
+        for _ in range(10):
+            candidate = f"{base}_{secrets.token_hex(2)}"[:30]
+            if await self._user_repo.get_by_username(candidate) is None:
+                return candidate
+        return f"user_{secrets.token_hex(6)}"
 
     async def _issue_login_or_2fa_challenge(
         self,
