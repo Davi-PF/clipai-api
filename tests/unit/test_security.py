@@ -1,5 +1,6 @@
 """Unit tests for Argon2id password hashing, SHA-256 helpers, and PyJWT tokens."""
 
+import hashlib
 from datetime import timedelta
 from uuid import uuid4
 
@@ -40,10 +41,12 @@ def test_refresh_token_generation_and_hashing() -> None:
     """Generate distinct opaque tokens and deterministic SHA-256 hashes."""
     first = generate_refresh_token()
     second = generate_refresh_token()
+    expected_sha256 = hashlib.sha256(first.encode("utf-8")).hexdigest()
 
     assert first != second
     assert len(hash_token(first)) == 64
-    assert hash_token(first) == hash_token(first)
+    assert hash_token(first) == expected_sha256
+    assert hash_token(first) != hash_token(second)
 
 
 def test_jwt_lifecycle_and_type_isolation(test_settings: Settings) -> None:
