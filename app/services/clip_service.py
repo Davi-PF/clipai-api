@@ -12,14 +12,18 @@ from app.core.exceptions import AppError
 from app.models.clip import Clip
 from app.models.user import User
 from app.repositories.clip_repository import ClipRepository
+from app.repositories.collection_repository import CollectionRepository
 from app.repositories.game_repository import GameRepository
 from app.repositories.tag_repository import TagRepository
 from app.schemas.clip import (
     ClipAuthorSummary,
     ClipDetailResponse,
+    ClipFavoriteResponse,
     ClipGameSummary,
+    ClipLikeResponse,
     ClipSummaryResponse,
     ClipUpdateRequest,
+    ClipViewResponse,
     PresignedUploadTarget,
     TechnicalMetadataSchema,
     UploadUrlRequest,
@@ -49,6 +53,7 @@ class ClipService:
         self._game_repo = GameRepository(session)
         self._tag_repo = TagRepository(session)
         self._clip_repo = ClipRepository(session)
+        self._collection_repo = CollectionRepository(session)
 
     async def list_games(
         self,
@@ -206,18 +211,23 @@ class ClipService:
         tag: str | None = None,
         author: str | None = None,
         mine: bool = False,
+        favorited: bool = False,
+        collection_id: UUID | None = None,
         sort: str = "recent",
         page: int = 1,
         page_size: int = 20,
         current_user: User | None = None,
     ) -> PaginatedResponse[ClipSummaryResponse]:
-        """List ready clips applying search, filters, and privacy visibility."""
-        if mine and current_user is None:
+        """List ready clips applying search, filters, privacy, and interaction state."""
+        if (mine or favorited) and current_user is None:
             raise AppError(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 code="INVALID_TOKEN",
-                message="Faça login para visualizar seus próprios clipes.",
+                message="Faça login para visualizar seus clipes ou favoritos.",
             )
+
+        if collection_id is not None:
+            await self._ensure_collection_readable(collection_id, current_user)
 
         resolved_game_id, resolved_game_slug = self._resolve_game_filter(
             game=game,
@@ -231,13 +241,23 @@ class ClipService:
             tag_slug=tag,
             author_username=author,
             mine=mine,
+            favorited_by_user_id=current_user.id if (favorited and current_user) else None,
+            collection_id=collection_id,
             current_user_id=current_user.id if current_user else None,
             sort=sort,
             page=page,
             page_size=page_size,
         )
+        liked_ids, favorited_ids = await self._load_user_interaction_sets(clips, current_user)
         return PaginatedResponse.create(
-            items=[self._to_summary_response(clip) for clip in clips],
+            items=[
+                self._to_summary_response(
+                    clip,
+                    is_liked=clip.id in liked_ids,
+                    is_favorited=clip.id in favorited_ids,
+                )
+                for clip in clips
+            ],
             page=page,
             page_size=page_size,
             total=total,
@@ -264,7 +284,77 @@ class ClipService:
                 message="Faça login para visualizar clipes restritos a amigos.",
             )
 
-        return self._to_detail_response(clip)
+        liked_ids, favorited_ids = await self._load_user_interaction_sets([clip], current_user)
+        return self._to_detail_response(
+            clip,
+            is_liked=clip.id in liked_ids,
+            is_favorited=clip.id in favorited_ids,
+        )
+
+    async def like_clip(self, clip_id: UUID, current_user: User) -> ClipLikeResponse:
+        """Idempotently like a ready accessible clip."""
+        clip = await self._get_readable_ready_clip(clip_id, current_user)
+        likes_count = await self._clip_repo.like_clip(user_id=current_user.id, clip_id=clip.id)
+        await self._session.commit()
+        return ClipLikeResponse(
+            clip_id=clip.id,
+            liked=True,
+            is_liked_by_me=True,
+            likes_count=likes_count,
+        )
+
+    async def unlike_clip(self, clip_id: UUID, current_user: User) -> ClipLikeResponse:
+        """Idempotently remove a like from a ready accessible clip."""
+        clip = await self._get_readable_ready_clip(clip_id, current_user)
+        likes_count = await self._clip_repo.unlike_clip(user_id=current_user.id, clip_id=clip.id)
+        await self._session.commit()
+        return ClipLikeResponse(
+            clip_id=clip.id,
+            liked=False,
+            is_liked_by_me=False,
+            likes_count=likes_count,
+        )
+
+    async def favorite_clip(self, clip_id: UUID, current_user: User) -> ClipFavoriteResponse:
+        """Idempotently favorite a ready accessible clip."""
+        clip = await self._get_readable_ready_clip(clip_id, current_user)
+        favorites_count = await self._clip_repo.favorite_clip(
+            user_id=current_user.id,
+            clip_id=clip.id,
+        )
+        await self._session.commit()
+        return ClipFavoriteResponse(
+            clip_id=clip.id,
+            favorited=True,
+            is_favorited_by_me=True,
+            favorites_count=favorites_count,
+        )
+
+    async def unfavorite_clip(self, clip_id: UUID, current_user: User) -> ClipFavoriteResponse:
+        """Idempotently remove a clip from user favorites."""
+        clip = await self._get_readable_ready_clip(clip_id, current_user)
+        favorites_count = await self._clip_repo.unfavorite_clip(
+            user_id=current_user.id,
+            clip_id=clip.id,
+        )
+        await self._session.commit()
+        return ClipFavoriteResponse(
+            clip_id=clip.id,
+            favorited=False,
+            is_favorited_by_me=False,
+            favorites_count=favorites_count,
+        )
+
+    async def register_view(
+        self,
+        clip_id: UUID,
+        current_user: User | None = None,
+    ) -> ClipViewResponse:
+        """Atomically increment views_count for a ready accessible clip."""
+        clip = await self._get_readable_ready_clip(clip_id, current_user)
+        views_count = await self._clip_repo.increment_views(clip.id)
+        await self._session.commit()
+        return ClipViewResponse(clip_id=clip.id, views_count=views_count)
 
     async def update_clip(
         self,
@@ -408,7 +498,66 @@ class ClipService:
             message="O clipe solicitado não foi encontrado.",
         )
 
-    def _to_summary_response(self, clip: Clip) -> ClipSummaryResponse:
+    async def _get_readable_ready_clip(
+        self,
+        clip_id: UUID,
+        current_user: User | None,
+    ) -> Clip:
+        """Fetch ready clip by UUID and verify privacy access."""
+        clip = await self._clip_repo.get_by_id(clip_id)
+        if clip is None or clip.status != "ready":
+            raise self._clip_not_found_error()
+        if clip.privacy == "friends" and current_user is None:
+            raise AppError(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                code="INVALID_TOKEN",
+                message="Faça login para interagir com clipes restritos a amigos.",
+            )
+        return clip
+
+    async def _ensure_collection_readable(
+        self,
+        collection_id: UUID,
+        current_user: User | None,
+    ) -> None:
+        """Verify collection exists and requester can view its clips."""
+        collection = await self._collection_repo.get_by_id(collection_id)
+        if collection is None:
+            raise AppError(
+                status_code=status.HTTP_404_NOT_FOUND,
+                code="RESOURCE_NOT_FOUND",
+                message="A coleção solicitada não foi encontrada.",
+            )
+        if collection.privacy == "friends" and current_user is None:
+            raise AppError(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                code="INVALID_TOKEN",
+                message="Faça login para visualizar coleções restritas a amigos.",
+            )
+
+    async def _load_user_interaction_sets(
+        self,
+        clips: list[Clip],
+        current_user: User | None,
+    ) -> tuple[set[UUID], set[UUID]]:
+        """Batch-load liked and favorited clip ID sets for an authenticated user."""
+        if current_user is None or not clips:
+            return set(), set()
+        clip_ids = [clip.id for clip in clips]
+        liked_ids = await self._clip_repo.get_user_liked_clip_ids(current_user.id, clip_ids)
+        favorited_ids = await self._clip_repo.get_user_favorited_clip_ids(
+            current_user.id,
+            clip_ids,
+        )
+        return liked_ids, favorited_ids
+
+    def _to_summary_response(
+        self,
+        clip: Clip,
+        *,
+        is_liked: bool = False,
+        is_favorited: bool = False,
+    ) -> ClipSummaryResponse:
         return ClipSummaryResponse(
             id=clip.id,
             slug=clip.slug,
@@ -424,13 +573,23 @@ class ClipService:
             views_count=clip.views_count,
             likes_count=clip.likes_count,
             favorites_count=clip.favorites_count,
+            is_liked=is_liked,
+            is_favorited=is_favorited,
+            is_liked_by_me=is_liked,
+            is_favorited_by_me=is_favorited,
             author=ClipAuthorSummary.model_validate(clip.author),
             game=ClipGameSummary.model_validate(clip.game) if clip.game else None,
             tags=[tag.slug for tag in clip.tags],
             created_at=clip.created_at,
         )
 
-    def _to_detail_response(self, clip: Clip) -> ClipDetailResponse:
+    def _to_detail_response(
+        self,
+        clip: Clip,
+        *,
+        is_liked: bool = False,
+        is_favorited: bool = False,
+    ) -> ClipDetailResponse:
         return ClipDetailResponse(
             id=clip.id,
             slug=clip.slug,
@@ -453,6 +612,10 @@ class ClipService:
             views_count=clip.views_count,
             likes_count=clip.likes_count,
             favorites_count=clip.favorites_count,
+            is_liked=is_liked,
+            is_favorited=is_favorited,
+            is_liked_by_me=is_liked,
+            is_favorited_by_me=is_favorited,
             author=ClipAuthorSummary.model_validate(clip.author),
             game=ClipGameSummary.model_validate(clip.game) if clip.game else None,
             tags=[tag.slug for tag in clip.tags],

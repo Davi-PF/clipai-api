@@ -1,20 +1,21 @@
-"""SQLAlchemy 2.0 async repository for Clip persistence, search, and filtering."""
+"""SQLAlchemy 2.0 async repository for Clip persistence, interactions, and filtering."""
 
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Select, and_, delete, func, or_, select
+from sqlalchemy import Select, and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models.clip import Clip, ClipTag, Tag
+from app.models.clip import Clip, ClipFavorite, ClipLike, ClipTag, Tag
+from app.models.collection import CollectionClip
 from app.models.game import Game
 from app.models.user import User
 
 
 class ClipRepository:
-    """Data access layer for the clips and clip_tags tables."""
+    """Data access layer for clips, clip_tags, clip_likes, and clip_favorites."""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -111,6 +112,136 @@ class ClipRepository:
         await self._session.delete(clip)
         await self._session.flush()
 
+    async def like_clip(self, *, user_id: UUID, clip_id: UUID) -> int:
+        """Idempotently add a like and atomically increment Clip.likes_count."""
+        exists_stmt = select(ClipLike.user_id).where(
+            ClipLike.user_id == user_id,
+            ClipLike.clip_id == clip_id,
+        )
+        existing = (await self._session.execute(exists_stmt)).scalar_one_or_none()
+        if existing is None:
+            self._session.add(ClipLike(user_id=user_id, clip_id=clip_id))
+            inc_stmt = (
+                update(Clip)
+                .where(Clip.id == clip_id)
+                .values(likes_count=Clip.likes_count + 1)
+                .returning(Clip.likes_count)
+            )
+            result = await self._session.execute(inc_stmt)
+            await self._session.flush()
+            return int(result.scalar_one())
+
+        count_stmt = select(Clip.likes_count).where(Clip.id == clip_id)
+        return int((await self._session.execute(count_stmt)).scalar_one())
+
+    async def unlike_clip(self, *, user_id: UUID, clip_id: UUID) -> int:
+        """Idempotently remove a like and atomically decrement Clip.likes_count."""
+        del_stmt = (
+            delete(ClipLike)
+            .where(ClipLike.user_id == user_id, ClipLike.clip_id == clip_id)
+            .returning(ClipLike.clip_id)
+        )
+        deleted = (await self._session.execute(del_stmt)).scalar_one_or_none()
+        if deleted is not None:
+            dec_stmt = (
+                update(Clip)
+                .where(Clip.id == clip_id)
+                .values(likes_count=func.greatest(Clip.likes_count - 1, 0))
+                .returning(Clip.likes_count)
+            )
+            result = await self._session.execute(dec_stmt)
+            await self._session.flush()
+            return int(result.scalar_one())
+
+        count_stmt = select(Clip.likes_count).where(Clip.id == clip_id)
+        return int((await self._session.execute(count_stmt)).scalar_one())
+
+    async def favorite_clip(self, *, user_id: UUID, clip_id: UUID) -> int:
+        """Idempotently add a favorite and atomically increment Clip.favorites_count."""
+        exists_stmt = select(ClipFavorite.user_id).where(
+            ClipFavorite.user_id == user_id,
+            ClipFavorite.clip_id == clip_id,
+        )
+        existing = (await self._session.execute(exists_stmt)).scalar_one_or_none()
+        if existing is None:
+            self._session.add(ClipFavorite(user_id=user_id, clip_id=clip_id))
+            inc_stmt = (
+                update(Clip)
+                .where(Clip.id == clip_id)
+                .values(favorites_count=Clip.favorites_count + 1)
+                .returning(Clip.favorites_count)
+            )
+            result = await self._session.execute(inc_stmt)
+            await self._session.flush()
+            return int(result.scalar_one())
+
+        count_stmt = select(Clip.favorites_count).where(Clip.id == clip_id)
+        return int((await self._session.execute(count_stmt)).scalar_one())
+
+    async def unfavorite_clip(self, *, user_id: UUID, clip_id: UUID) -> int:
+        """Idempotently remove a favorite and atomically decrement Clip.favorites_count."""
+        del_stmt = (
+            delete(ClipFavorite)
+            .where(ClipFavorite.user_id == user_id, ClipFavorite.clip_id == clip_id)
+            .returning(ClipFavorite.clip_id)
+        )
+        deleted = (await self._session.execute(del_stmt)).scalar_one_or_none()
+        if deleted is not None:
+            dec_stmt = (
+                update(Clip)
+                .where(Clip.id == clip_id)
+                .values(favorites_count=func.greatest(Clip.favorites_count - 1, 0))
+                .returning(Clip.favorites_count)
+            )
+            result = await self._session.execute(dec_stmt)
+            await self._session.flush()
+            return int(result.scalar_one())
+
+        count_stmt = select(Clip.favorites_count).where(Clip.id == clip_id)
+        return int((await self._session.execute(count_stmt)).scalar_one())
+
+    async def increment_views(self, clip_id: UUID) -> int:
+        """Atomically increment Clip.views_count and return updated counter."""
+        stmt = (
+            update(Clip)
+            .where(Clip.id == clip_id)
+            .values(views_count=Clip.views_count + 1)
+            .returning(Clip.views_count)
+        )
+        result = await self._session.execute(stmt)
+        await self._session.flush()
+        return int(result.scalar_one())
+
+    async def get_user_liked_clip_ids(
+        self,
+        user_id: UUID,
+        clip_ids: list[UUID],
+    ) -> set[UUID]:
+        """Batch-fetch clip IDs liked by the given user (avoids N+1 queries)."""
+        if not clip_ids:
+            return set()
+        stmt = select(ClipLike.clip_id).where(
+            ClipLike.user_id == user_id,
+            ClipLike.clip_id.in_(clip_ids),
+        )
+        result = await self._session.execute(stmt)
+        return set(result.scalars().all())
+
+    async def get_user_favorited_clip_ids(
+        self,
+        user_id: UUID,
+        clip_ids: list[UUID],
+    ) -> set[UUID]:
+        """Batch-fetch clip IDs favorited by the given user (avoids N+1 queries)."""
+        if not clip_ids:
+            return set()
+        stmt = select(ClipFavorite.clip_id).where(
+            ClipFavorite.user_id == user_id,
+            ClipFavorite.clip_id.in_(clip_ids),
+        )
+        result = await self._session.execute(stmt)
+        return set(result.scalars().all())
+
     async def list_clips(
         self,
         *,
@@ -120,6 +251,8 @@ class ClipRepository:
         tag_slug: str | None = None,
         author_username: str | None = None,
         mine: bool = False,
+        favorited_by_user_id: UUID | None = None,
+        collection_id: UUID | None = None,
         current_user_id: UUID | None = None,
         sort: str = "recent",
         page: int = 1,
@@ -136,6 +269,8 @@ class ClipRepository:
             tag_slug=tag_slug,
             author_username=author_username,
             mine=mine,
+            favorited_by_user_id=favorited_by_user_id,
+            collection_id=collection_id,
             current_user_id=current_user_id,
         )
         if filters:
@@ -145,8 +280,10 @@ class ClipRepository:
         total_result = await self._session.execute(count_stmt)
         total = int(total_result.scalar_one())
 
-        if sort == "popular":
+        if sort in ("popular", "featured"):
+            engagement = Clip.likes_count * 3 + Clip.favorites_count * 2 + Clip.views_count
             stmt = stmt.order_by(
+                engagement.desc(),
                 Clip.likes_count.desc(),
                 Clip.views_count.desc(),
                 Clip.created_at.desc(),
@@ -158,8 +295,9 @@ class ClipRepository:
         items_result = await self._session.execute(stmt.offset(offset).limit(page_size))
         return list(items_result.scalars().all()), total
 
-    @staticmethod
+    @classmethod
     def _build_list_filters(
+        cls,
         *,
         q: str | None,
         game_id: UUID | None,
@@ -167,11 +305,37 @@ class ClipRepository:
         tag_slug: str | None,
         author_username: str | None,
         mine: bool,
+        favorited_by_user_id: UUID | None,
+        collection_id: UUID | None,
         current_user_id: UUID | None,
     ) -> list[Any]:
         """Construct SQLAlchemy filter clauses for clip listing."""
-        filters: list[Any] = [Clip.status == "ready"]
+        filters = cls._build_visibility_filters(
+            mine=mine,
+            favorited_by_user_id=favorited_by_user_id,
+            collection_id=collection_id,
+            current_user_id=current_user_id,
+        )
+        filters.extend(
+            cls._build_metadata_filters(
+                q=q,
+                game_id=game_id,
+                game_slug=game_slug,
+                tag_slug=tag_slug,
+                author_username=author_username,
+            )
+        )
+        return filters
 
+    @staticmethod
+    def _build_visibility_filters(
+        *,
+        mine: bool,
+        favorited_by_user_id: UUID | None,
+        collection_id: UUID | None,
+        current_user_id: UUID | None,
+    ) -> list[Any]:
+        filters: list[Any] = [Clip.status == "ready"]
         if mine and current_user_id is not None:
             filters.append(Clip.user_id == current_user_id)
         elif current_user_id is None:
@@ -184,6 +348,29 @@ class ClipRepository:
                 )
             )
 
+        if favorited_by_user_id is not None:
+            fav_subq = select(ClipFavorite.clip_id).where(
+                ClipFavorite.user_id == favorited_by_user_id
+            )
+            filters.append(Clip.id.in_(fav_subq))
+
+        if collection_id is not None:
+            coll_subq = select(CollectionClip.clip_id).where(
+                CollectionClip.collection_id == collection_id
+            )
+            filters.append(Clip.id.in_(coll_subq))
+        return filters
+
+    @staticmethod
+    def _build_metadata_filters(
+        *,
+        q: str | None,
+        game_id: UUID | None,
+        game_slug: str | None,
+        tag_slug: str | None,
+        author_username: str | None,
+    ) -> list[Any]:
+        filters: list[Any] = []
         if q and q.strip():
             pattern = f"%{q.strip()}%"
             filters.append(
@@ -203,5 +390,4 @@ class ClipRepository:
             filters.append(
                 Clip.author.has(func.lower(User.username) == author_username.strip().lower())
             )
-
         return filters

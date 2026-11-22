@@ -111,6 +111,7 @@ erDiagram
         varchar title
         text description
         varchar privacy
+        varchar accent_color
         timestamptz created_at
         timestamptz updated_at
     }
@@ -255,6 +256,7 @@ Coleções (playlists) criadas pelos usuários para organizar clipes.
 | `title` | `VARCHAR(100)` | Não | — | Título da coleção |
 | `description` | `TEXT` | Sim | `NULL` | Descrição opcional (máx. 500 caracteres) |
 | `privacy` | `VARCHAR(20)` | Não | `'public'` | `CHECK (privacy IN ('public', 'friends', 'unlisted'))` |
+| `accent_color` | `VARCHAR(7)` | Sim | `NULL` | Cor hexadecimal opcional (`#RRGGBB`) para destaque no leque Bento |
 | `created_at` | `TIMESTAMPTZ` | Não | `now()` | Timestamp de criação |
 | `updated_at` | `TIMESTAMPTZ` | Não | `now()` | Timestamp de atualização |
 
