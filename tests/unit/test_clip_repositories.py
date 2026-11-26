@@ -5,9 +5,10 @@ from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.clip import Clip, Tag
+from app.models.clip import Clip, ClipView, Tag
 from app.models.game import Game
 from app.repositories.clip_repository import ClipRepository
 from app.repositories.game_repository import GameRepository
@@ -148,3 +149,55 @@ async def test_clip_repository_crud_and_filtering() -> None:
     )
     assert mine_total == 1
     assert mine_items == [clip]
+
+
+async def test_clip_repository_featured_most_viewed_period_and_view_recording() -> None:
+    """Verify ClipRepository featured/most_viewed/period SQL queries and ClipView tracking."""
+    session = AsyncMock(spec=AsyncSession)
+    session.add = MagicMock()
+    repo = ClipRepository(session)
+
+    clip_id = uuid4()
+    viewer_id = uuid4()
+    view_res = MagicMock()
+    view_res.scalar_one.return_value = 42
+    session.execute.return_value = view_res
+
+    updated_views = await repo.increment_views(clip_id, viewer_id=viewer_id)
+    assert updated_views == 42
+    added_view = session.add.call_args[0][0]
+    assert isinstance(added_view, ClipView)
+    assert added_view.clip_id == clip_id
+    assert added_view.viewer_id == viewer_id
+
+    # Test featured/most_viewed/recent combinations across period windows
+    for sort_opt, period_opt in [
+        ("featured", "all"),
+        ("featured", "7d"),
+        ("most_viewed", "all"),
+        ("most_viewed", "30d"),
+        ("recent", "7d"),
+    ]:
+        count_res = MagicMock()
+        count_res.scalar_one.return_value = 0
+        items_res = MagicMock()
+        items_res.scalars.return_value.all.return_value = []
+        session.execute.side_effect = [count_res, items_res]
+
+        items, total = await repo.list_clips(sort=sort_opt, period=period_opt)
+        assert items == []
+        assert total == 0
+
+        list_stmt = session.execute.call_args_list[-1][0][0]
+        compiled_sql = str(list_stmt.compile(dialect=postgresql.dialect()))
+        if sort_opt == "featured":
+            assert "favorites_count" in compiled_sql or "period_favorites" in compiled_sql
+        if sort_opt == "most_viewed":
+            assert "views_count" in compiled_sql or "clip_views" in compiled_sql
+
+    top_res = MagicMock()
+    top_res.scalar_one_or_none.return_value = clip_id
+    session.execute.side_effect = None
+    session.execute.return_value = top_res
+    assert await repo.get_top_highlight_clip_id(current_user_id=viewer_id, period="7d") == clip_id
+    assert await repo.get_top_highlight_clip_id(current_user_id=None, period="all") == clip_id

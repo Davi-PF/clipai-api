@@ -32,6 +32,8 @@ erDiagram
 
     clips ||--o{ clip_likes : "recebe"
     clips ||--o{ clip_favorites : "recebe"
+    clips ||--o{ clip_views : "registra"
+    users ||--o{ clip_views : "visualiza"
     clips ||--o{ clip_watch_sessions : "gera"
     users ||--o{ clip_watch_sessions : "assiste"
 
@@ -141,6 +143,13 @@ erDiagram
     clip_favorites {
         uuid user_id PK, FK
         uuid clip_id PK, FK
+        timestamptz created_at
+    }
+
+    clip_views {
+        uuid id PK
+        uuid clip_id FK
+        uuid viewer_id FK
         timestamptz created_at
     }
 
@@ -344,6 +353,18 @@ Armazena sessões de visualização e checkpoints de retenção de vídeo (0% a 
 
 ---
 
+### 3.12. `clip_views`
+Registro temporal de eventos de visualização de clipes para rankings por janela de tempo (`7d`, `30d`, `all`) na aba **Mais Vistos**.
+
+| Coluna | Tipo PostgreSQL | Nulo? | Default | Constraints / Observações |
+| :--- | :--- | :---: | :--- | :--- |
+| `id` | `UUID` | Não | `gen_random_uuid()` | `PRIMARY KEY` |
+| `clip_id` | `UUID` | Não | — | `FOREIGN KEY REFERENCES clips(id) ON DELETE CASCADE` |
+| `viewer_id` | `UUID` | Sim | `NULL` | `FOREIGN KEY REFERENCES users(id) ON DELETE SET NULL` |
+| `created_at` | `TIMESTAMPTZ` | Não | `now()` | Timestamp da visualização registrada |
+
+---
+
 ## 4. Schema do Campo `technical_metadata` (`JSONB`)
 
 A coluna `clips.technical_metadata` armazena propriedades de codificação e resolução extraídas do vídeo no cliente (e extensíveis no Pós-MVP com dados de transcodificação HLS/FFprobe). O payload é validado via Pydantic v2 (`TechnicalMetadataSchema`) antes de ser persistido.
@@ -425,10 +446,14 @@ CREATE INDEX ix_clip_tags_tag_id ON clip_tags (tag_id);
 CREATE INDEX ix_collection_clips_clip_id ON collection_clips (clip_id);
 CREATE INDEX ix_collection_clips_order ON collection_clips (collection_id, position ASC);
 CREATE INDEX ix_clip_likes_clip_id ON clip_likes (clip_id);
+CREATE INDEX ix_clip_likes_created_clip ON clip_likes (created_at, clip_id);
 CREATE INDEX ix_clip_favorites_user_created ON clip_favorites (user_id, created_at DESC);
+CREATE INDEX ix_clip_favorites_created_clip ON clip_favorites (created_at, clip_id);
 CREATE INDEX ix_collections_user_privacy ON collections (user_id, privacy, created_at DESC);
 
--- 7. Telemetria de Retenção (clip_watch_sessions): agregações por clipe e período
+-- 7. Telemetria de Retenção e Visualizações Temporais
+CREATE INDEX ix_clip_views_clip_created ON clip_views (clip_id, created_at DESC);
+CREATE INDEX ix_clip_views_created_clip ON clip_views (created_at, clip_id);
 CREATE INDEX ix_clip_watch_sessions_clip_id ON clip_watch_sessions (clip_id);
 CREATE INDEX ix_clip_watch_sessions_clip_created ON clip_watch_sessions (clip_id, created_at);
 CREATE INDEX ix_clip_watch_sessions_viewer_id ON clip_watch_sessions (viewer_id);

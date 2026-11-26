@@ -1,5 +1,6 @@
 """SQLAlchemy 2.0 async repository for Clip persistence, interactions, and filtering."""
 
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -8,10 +9,12 @@ from sqlalchemy import Select, and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models.clip import Clip, ClipFavorite, ClipLike, ClipTag, Tag
+from app.models.clip import Clip, ClipFavorite, ClipLike, ClipTag, ClipView, Tag
 from app.models.collection import CollectionClip
 from app.models.game import Game
 from app.models.user import User
+
+_PERIOD_DAYS: dict[str, int] = {"7d": 7, "30d": 30}
 
 
 class ClipRepository:
@@ -200,8 +203,9 @@ class ClipRepository:
         count_stmt = select(Clip.favorites_count).where(Clip.id == clip_id)
         return int((await self._session.execute(count_stmt)).scalar_one())
 
-    async def increment_views(self, clip_id: UUID) -> int:
-        """Atomically increment Clip.views_count and return updated counter."""
+    async def increment_views(self, clip_id: UUID, *, viewer_id: UUID | None = None) -> int:
+        """Record a temporal clip view event and atomically increment Clip.views_count."""
+        self._session.add(ClipView(clip_id=clip_id, viewer_id=viewer_id))
         stmt = (
             update(Clip)
             .where(Clip.id == clip_id)
@@ -255,10 +259,11 @@ class ClipRepository:
         collection_id: UUID | None = None,
         current_user_id: UUID | None = None,
         sort: str = "recent",
+        period: str = "all",
         page: int = 1,
         page_size: int = 20,
     ) -> tuple[list[Clip], int]:
-        """List ready clips applying privacy visibility, search, and filters."""
+        """List ready clips applying privacy visibility, search, period, and ranking."""
         stmt: Select[tuple[Clip]] = select(Clip).options(*self._base_load_options())
         count_stmt: Select[tuple[int]] = select(func.count(Clip.id))
 
@@ -277,10 +282,77 @@ class ClipRepository:
             stmt = stmt.where(*filters)
             count_stmt = count_stmt.where(*filters)
 
+        cutoff = self._resolve_period_cutoff(period)
+        stmt, count_stmt = self._apply_sort_and_period(
+            stmt=stmt,
+            count_stmt=count_stmt,
+            sort=sort,
+            cutoff=cutoff,
+        )
+
         total_result = await self._session.execute(count_stmt)
         total = int(total_result.scalar_one())
 
-        if sort in ("popular", "featured"):
+        offset = (page - 1) * page_size
+        items_result = await self._session.execute(stmt.offset(offset).limit(page_size))
+        return list(items_result.scalars().all()), total
+
+    async def get_top_highlight_clip_id(
+        self,
+        *,
+        current_user_id: UUID | None = None,
+        period: str = "all",
+    ) -> UUID | None:
+        """Return the ID of the #1 ranked highlight clip visible to the requester."""
+        stmt: Select[tuple[UUID]] = select(Clip.id)
+        visibility_filters = self._build_visibility_filters(
+            mine=False,
+            favorited_by_user_id=None,
+            collection_id=None,
+            current_user_id=current_user_id,
+        )
+        stmt = stmt.where(*visibility_filters)
+        cutoff = self._resolve_period_cutoff(period)
+        stmt, _ = self._apply_featured_ranking(stmt=stmt, count_stmt=None, cutoff=cutoff)
+        result = await self._session.execute(stmt.limit(1))
+        return result.scalar_one_or_none()
+
+    @staticmethod
+    def _resolve_period_cutoff(period: str) -> datetime | None:
+        days = _PERIOD_DAYS.get(period)
+        if days is None:
+            return None
+        return datetime.now(UTC) - timedelta(days=days)
+
+    @classmethod
+    def _apply_sort_and_period(
+        cls,
+        *,
+        stmt: Select[tuple[Clip]],
+        count_stmt: Select[tuple[int]],
+        sort: str,
+        cutoff: datetime | None,
+    ) -> tuple[Select[tuple[Clip]], Select[tuple[int]]]:
+        if sort == "featured":
+            ranked_stmt, ranked_count = cls._apply_featured_ranking(
+                stmt=stmt,
+                count_stmt=count_stmt,
+                cutoff=cutoff,
+            )
+            return ranked_stmt, (ranked_count if ranked_count is not None else count_stmt)
+
+        if sort == "most_viewed":
+            return cls._apply_most_viewed_ranking(
+                stmt=stmt,
+                count_stmt=count_stmt,
+                cutoff=cutoff,
+            )
+
+        if cutoff is not None:
+            stmt = stmt.where(Clip.created_at >= cutoff)
+            count_stmt = count_stmt.where(Clip.created_at >= cutoff)
+
+        if sort == "popular":
             engagement = Clip.likes_count * 3 + Clip.favorites_count * 2 + Clip.views_count
             stmt = stmt.order_by(
                 engagement.desc(),
@@ -291,9 +363,109 @@ class ClipRepository:
         else:
             stmt = stmt.order_by(Clip.created_at.desc())
 
-        offset = (page - 1) * page_size
-        items_result = await self._session.execute(stmt.offset(offset).limit(page_size))
-        return list(items_result.scalars().all()), total
+        return stmt, count_stmt
+
+    @staticmethod
+    def _apply_featured_ranking(
+        *,
+        stmt: Select[Any],
+        count_stmt: Select[tuple[int]] | None,
+        cutoff: datetime | None,
+    ) -> tuple[Select[Any], Select[tuple[int]] | None]:
+        """Rank clips by favorites * 2 + likes, requiring positive engagement."""
+        if cutoff is None:
+            eligibility = or_(Clip.favorites_count > 0, Clip.likes_count > 0)
+            score = Clip.favorites_count * 2 + Clip.likes_count
+            stmt = stmt.where(eligibility).order_by(
+                score.desc(),
+                Clip.favorites_count.desc(),
+                Clip.likes_count.desc(),
+                Clip.views_count.desc(),
+                Clip.created_at.desc(),
+            )
+            if count_stmt is not None:
+                count_stmt = count_stmt.where(eligibility)
+            return stmt, count_stmt
+
+        likes_sq = (
+            select(ClipLike.clip_id.label("clip_id"), func.count().label("period_likes"))
+            .where(ClipLike.created_at >= cutoff)
+            .group_by(ClipLike.clip_id)
+            .subquery()
+        )
+        favs_sq = (
+            select(ClipFavorite.clip_id.label("clip_id"), func.count().label("period_favorites"))
+            .where(ClipFavorite.created_at >= cutoff)
+            .group_by(ClipFavorite.clip_id)
+            .subquery()
+        )
+        period_likes = func.coalesce(likes_sq.c.period_likes, 0)
+        period_favs = func.coalesce(favs_sq.c.period_favorites, 0)
+        eligibility = (period_favs + period_likes) > 0
+        score = period_favs * 2 + period_likes
+
+        stmt = (
+            stmt.outerjoin(likes_sq, Clip.id == likes_sq.c.clip_id)
+            .outerjoin(favs_sq, Clip.id == favs_sq.c.clip_id)
+            .where(eligibility)
+            .order_by(
+                score.desc(),
+                period_favs.desc(),
+                period_likes.desc(),
+                Clip.views_count.desc(),
+                Clip.created_at.desc(),
+            )
+        )
+        if count_stmt is not None:
+            count_stmt = (
+                count_stmt.outerjoin(likes_sq, Clip.id == likes_sq.c.clip_id)
+                .outerjoin(favs_sq, Clip.id == favs_sq.c.clip_id)
+                .where(eligibility)
+            )
+        return stmt, count_stmt
+
+    @staticmethod
+    def _apply_most_viewed_ranking(
+        *,
+        stmt: Select[tuple[Clip]],
+        count_stmt: Select[tuple[int]],
+        cutoff: datetime | None,
+    ) -> tuple[Select[tuple[Clip]], Select[tuple[int]]]:
+        """Rank clips by views (all-time or within temporal window), requiring views > 0."""
+        if cutoff is None:
+            eligibility = Clip.views_count > 0
+            stmt = stmt.where(eligibility).order_by(
+                Clip.views_count.desc(),
+                Clip.favorites_count.desc(),
+                Clip.likes_count.desc(),
+                Clip.created_at.desc(),
+            )
+            count_stmt = count_stmt.where(eligibility)
+            return stmt, count_stmt
+
+        views_sq = (
+            select(ClipView.clip_id.label("clip_id"), func.count().label("period_views"))
+            .where(ClipView.created_at >= cutoff)
+            .group_by(ClipView.clip_id)
+            .subquery()
+        )
+        period_views = func.coalesce(views_sq.c.period_views, 0)
+        eligibility = period_views > 0
+
+        stmt = (
+            stmt.outerjoin(views_sq, Clip.id == views_sq.c.clip_id)
+            .where(eligibility)
+            .order_by(
+                period_views.desc(),
+                Clip.favorites_count.desc(),
+                Clip.likes_count.desc(),
+                Clip.created_at.desc(),
+            )
+        )
+        count_stmt = count_stmt.outerjoin(views_sq, Clip.id == views_sq.c.clip_id).where(
+            eligibility
+        )
+        return stmt, count_stmt
 
     async def list_creator_clips(
         self,

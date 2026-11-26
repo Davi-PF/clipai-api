@@ -94,7 +94,8 @@ class _FakeClipRepo:
             clip.favorites_count = max(clip.favorites_count - 1, 0)
         return clip.favorites_count
 
-    async def increment_views(self, clip_id: UUID) -> int:
+    async def increment_views(self, clip_id: UUID, *, viewer_id: UUID | None = None) -> int:
+        _ = viewer_id
         clip = self._store.clips[clip_id]
         clip.views_count += 1
         return clip.views_count
@@ -104,6 +105,32 @@ class _FakeClipRepo:
 
     async def get_user_favorited_clip_ids(self, user_id: UUID, clip_ids: list[UUID]) -> set[UUID]:
         return {cid for cid in clip_ids if (user_id, cid) in self._store.favorites}
+
+    async def get_top_highlight_clip_id(
+        self,
+        *,
+        current_user_id: UUID | None = None,
+        period: str = "all",
+    ) -> UUID | None:
+        _ = (current_user_id, period)
+        eligible = [
+            c
+            for c in self._store.clips.values()
+            if c.status == "ready" and (c.favorites_count > 0 or c.likes_count > 0)
+        ]
+        if not eligible:
+            return None
+        eligible.sort(
+            key=lambda c: (
+                c.favorites_count * 2 + c.likes_count,
+                c.favorites_count,
+                c.likes_count,
+                c.views_count,
+                c.created_at,
+            ),
+            reverse=True,
+        )
+        return eligible[0].id
 
     async def list_clips(
         self,
@@ -118,10 +145,11 @@ class _FakeClipRepo:
         collection_id: UUID | None = None,
         current_user_id: UUID | None = None,
         sort: str = "recent",
+        period: str = "all",
         page: int = 1,
         page_size: int = 20,
     ) -> tuple[list[Clip], int]:
-        _ = (q, game_id, game_slug, tag_slug, author_username)
+        _ = (q, game_id, game_slug, tag_slug, author_username, period)
         clips = [c for c in self._store.clips.values() if c.status == "ready"]
         if mine and current_user_id is not None:
             clips = [c for c in clips if c.user_id == current_user_id]
