@@ -201,6 +201,17 @@ class ClipService:
         refreshed = await self._clip_repo.get_by_id(clip.id)
         return self._to_detail_response(refreshed or clip)
 
+    async def cancel_upload(self, clip_id: UUID, current_user: User) -> None:
+        """Cancel an unconfirmed upload, deleting the DB row and any R2 objects."""
+        clip = await self._get_owned_clip(clip_id, current_user)
+        if clip.status == "ready":
+            raise AppError(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                code="BAD_REQUEST",
+                message="Não é possível cancelar um envio já finalizado.",
+            )
+        await self._delete_clip_and_objects(clip)
+
     async def list_clips(
         self,
         *,
@@ -386,6 +397,10 @@ class ClipService:
     async def delete_clip(self, clip_id: UUID, current_user: User) -> None:
         """Delete clip from PostgreSQL and remove media objects from Cloudflare R2."""
         clip = await self._get_owned_clip(clip_id, current_user)
+        await self._delete_clip_and_objects(clip)
+
+    async def _delete_clip_and_objects(self, clip: Clip) -> None:
+        """Remove a clip record from PostgreSQL and delete its R2 objects."""
         object_keys = [clip.video_object_key]
         if clip.thumbnail_object_key:
             object_keys.append(clip.thumbnail_object_key)

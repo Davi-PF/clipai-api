@@ -104,6 +104,20 @@ async def confirm_clip_upload_alias(
     return await clip_service.confirm_upload(clip_id, current_user)
 
 
+@router.post(
+    "/{clip_id}/cancel-upload",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Cancela um envio pendente, remove o registro e exclui arquivos órfãos no R2",
+)
+async def cancel_clip_upload(
+    clip_id: UUID,
+    current_user: User = Depends(get_verified_user),
+    clip_service: ClipService = Depends(get_clip_service),
+) -> None:
+    """Cancel an unconfirmed clip upload and remove DB record and R2 objects."""
+    await clip_service.cancel_upload(clip_id, current_user)
+
+
 @router.get(
     "",
     response_model=PaginatedResponse[ClipSummaryResponse],
