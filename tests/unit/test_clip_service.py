@@ -296,3 +296,53 @@ async def test_cancel_upload_deletes_pending_and_failed_but_blocks_ready_and_non
     service._clip_repo.get_by_id.return_value = failed_no_thumb
     await service.cancel_upload(failed_no_thumb.id, owner)
     storage.delete_objects.assert_awaited_with([failed_no_thumb.video_object_key])
+
+
+async def test_list_clips_forwards_period_and_marks_only_top_highlight(
+    test_settings: Settings,
+) -> None:
+    """Pass period to repository and mark is_top_highlight only on the global/period #1 clip."""
+    service, session, _storage = _build_service(test_settings)
+    owner = _make_user()
+    top_clip = _make_clip(owner, status="ready")
+    second_clip = _make_clip(owner, status="ready")
+
+    service._clip_repo = AsyncMock()
+    service._clip_repo.list_clips.return_value = ([top_clip, second_clip], 2)
+    service._clip_repo.get_user_liked_clip_ids.return_value = set()
+    service._clip_repo.get_user_favorited_clip_ids.return_value = set()
+    service._clip_repo.get_top_highlight_clip_id.return_value = top_clip.id
+
+    res = await service.list_clips(sort="featured", period="7d", page=1, page_size=4)
+    service._clip_repo.list_clips.assert_awaited_once()
+    call_kwargs = service._clip_repo.list_clips.call_args.kwargs
+    assert call_kwargs["sort"] == "featured"
+    assert call_kwargs["period"] == "7d"
+    service._clip_repo.get_top_highlight_clip_id.assert_awaited_once_with(
+        current_user_id=None,
+        period="7d",
+    )
+    assert [item.is_top_highlight for item in res.items] == [True, False]
+
+    # When sort != featured, top highlight lookup always uses period="all"
+    service._clip_repo.get_top_highlight_clip_id.reset_mock()
+    await service.list_clips(sort="most_viewed", period="30d", current_user=owner)
+    service._clip_repo.get_top_highlight_clip_id.assert_awaited_once_with(
+        current_user_id=owner.id,
+        period="all",
+    )
+
+    # Empty result skips top highlight lookup
+    service._clip_repo.get_top_highlight_clip_id.reset_mock()
+    service._clip_repo.list_clips.return_value = ([], 0)
+    empty_res = await service.list_clips(sort="featured", period="7d")
+    assert empty_res.items == []
+    service._clip_repo.get_top_highlight_clip_id.assert_not_awaited()
+
+    # register_view passes viewer_id when authenticated
+    service._clip_repo.get_by_id.return_value = top_clip
+    service._clip_repo.increment_views.return_value = 11
+    view_res = await service.register_view(top_clip.id, owner)
+    assert view_res.views_count == 11
+    service._clip_repo.increment_views.assert_awaited_once_with(top_clip.id, viewer_id=owner.id)
+    session.commit.assert_awaited_once()

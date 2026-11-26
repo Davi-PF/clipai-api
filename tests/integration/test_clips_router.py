@@ -1,7 +1,7 @@
 """End-to-end integration tests for /api/v1/games, /api/v1/tags, and /api/v1/clips/*."""
 
 from collections.abc import AsyncGenerator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -33,6 +33,9 @@ class _InMemoryClipStore:
         self.games: dict[UUID, Game] = {}
         self.tags: dict[str, Tag] = {}
         self.clips: dict[UUID, Clip] = {}
+        self.like_events: list[tuple[UUID, UUID, datetime]] = []
+        self.favorite_events: list[tuple[UUID, UUID, datetime]] = []
+        self.view_events: list[tuple[UUID, UUID | None, datetime]] = []
 
 
 class _FakeUserRepo:
@@ -183,6 +186,68 @@ class _FakeClipRepo:
     ) -> set[UUID]:
         return set()
 
+    async def increment_views(self, clip_id: UUID, *, viewer_id: UUID | None = None) -> int:
+        clip = self._store.clips[clip_id]
+        clip.views_count += 1
+        self._store.view_events.append((clip_id, viewer_id, datetime.now(UTC)))
+        return clip.views_count
+
+    @staticmethod
+    def _resolve_cutoff(period: str) -> datetime | None:
+        if period == "7d":
+            return datetime.now(UTC) - timedelta(days=7)
+        if period == "30d":
+            return datetime.now(UTC) - timedelta(days=30)
+        return None
+
+    def _period_counts(self, clip: Clip, cutoff: datetime | None) -> tuple[int, int, int]:
+        if cutoff is None:
+            return clip.likes_count, clip.favorites_count, clip.views_count
+        likes = sum(
+            1 for cid, _uid, ts in self._store.like_events if cid == clip.id and ts >= cutoff
+        )
+        favs = sum(
+            1 for cid, _uid, ts in self._store.favorite_events if cid == clip.id and ts >= cutoff
+        )
+        views = sum(
+            1 for cid, _uid, ts in self._store.view_events if cid == clip.id and ts >= cutoff
+        )
+        return likes, favs, views
+
+    async def get_top_highlight_clip_id(
+        self,
+        *,
+        current_user_id: UUID | None = None,
+        period: str = "all",
+    ) -> UUID | None:
+        clips = [c for c in self._store.clips.values() if c.status == "ready"]
+        clips = self._filter_visibility(clips, mine=False, current_user_id=current_user_id)
+        cutoff = self._resolve_cutoff(period)
+        ranked = self._rank_featured(clips, cutoff=cutoff)
+        return ranked[0].id if ranked else None
+
+    def _rank_featured(self, clips: list[Clip], *, cutoff: datetime | None) -> list[Clip]:
+        eligible: list[tuple[tuple[int, int, int, int, datetime], Clip]] = []
+        for clip in clips:
+            likes, favs, _views = self._period_counts(clip, cutoff)
+            if favs + likes <= 0:
+                continue
+            score = favs * 2 + likes
+            eligible.append(((score, favs, likes, clip.views_count, clip.created_at), clip))
+        eligible.sort(key=lambda item: item[0], reverse=True)
+        return [clip for _key, clip in eligible]
+
+    def _rank_most_viewed(self, clips: list[Clip], *, cutoff: datetime | None) -> list[Clip]:
+        eligible: list[tuple[tuple[int, int, int, datetime], Clip]] = []
+        for clip in clips:
+            _likes, _favs, views = self._period_counts(clip, cutoff)
+            if views <= 0:
+                continue
+            rank_key = (views, clip.favorites_count, clip.likes_count, clip.created_at)
+            eligible.append((rank_key, clip))
+        eligible.sort(key=lambda item: item[0], reverse=True)
+        return [clip for _key, clip in eligible]
+
     async def list_clips(
         self,
         *,
@@ -196,6 +261,7 @@ class _FakeClipRepo:
         collection_id: UUID | None = None,
         current_user_id: UUID | None = None,
         sort: str = "recent",
+        period: str = "all",
         page: int = 1,
         page_size: int = 20,
     ) -> tuple[list[Clip], int]:
@@ -210,10 +276,26 @@ class _FakeClipRepo:
             tag_slug=tag_slug,
             author_username=author_username,
         )
-        if sort == "popular":
-            clips.sort(key=lambda c: (c.likes_count, c.views_count, c.created_at), reverse=True)
+        cutoff = self._resolve_cutoff(period)
+        if sort == "featured":
+            clips = self._rank_featured(clips, cutoff=cutoff)
+        elif sort == "most_viewed":
+            clips = self._rank_most_viewed(clips, cutoff=cutoff)
         else:
-            clips.sort(key=lambda c: c.created_at, reverse=True)
+            if cutoff is not None:
+                clips = [c for c in clips if c.created_at >= cutoff]
+            if sort == "popular":
+                clips.sort(
+                    key=lambda c: (
+                        c.likes_count * 3 + c.favorites_count * 2 + c.views_count,
+                        c.likes_count,
+                        c.views_count,
+                        c.created_at,
+                    ),
+                    reverse=True,
+                )
+            else:
+                clips.sort(key=lambda c: c.created_at, reverse=True)
         total = len(clips)
         start = (page - 1) * page_size
         return clips[start : start + page_size], total
@@ -722,3 +804,151 @@ def _upload_verification_error() -> Exception:
         code="UPLOAD_VERIFICATION_FAILED",
         message="Não foi possível confirmar o envio do arquivo no servidor de mídia.",
     )
+
+
+async def test_featured_most_viewed_period_filtering_and_top_highlight_flag(
+    clips_test_env: dict[str, Any],
+) -> None:
+    """Validate featured weighting (favorites*2+likes), most_viewed, temporal window, and badge."""
+    app = clips_test_env["app"]
+    store: _InMemoryClipStore = clips_test_env["store"]
+    owner: User = clips_test_env["owner"]
+    other: User = clips_test_env["other"]
+    cs2: Game = clips_test_env["cs2"]
+    now = datetime.now(UTC)
+
+    def add_clip(
+        *,
+        slug: str,
+        title: str,
+        likes: int,
+        favorites: int,
+        views: int,
+        created_at: datetime,
+    ) -> Clip:
+        clip_id = uuid4()
+        clip = Clip(
+            id=clip_id,
+            slug=slug,
+            user_id=owner.id,
+            game_id=cs2.id,
+            title=title,
+            description=None,
+            status="ready",
+            privacy="public",
+            video_object_key=f"clips/{owner.id}/{clip_id}/video.mp4",
+            thumbnail_object_key=None,
+            file_size_bytes=5_000_000,
+            duration_seconds=Decimal("20.00"),
+            mime_type="video/mp4",
+            technical_metadata={},
+            views_count=views,
+            likes_count=likes,
+            favorites_count=favorites,
+            author=owner,
+            game=cs2,
+            tags=[],
+            created_at=created_at,
+            updated_at=created_at,
+        )
+        store.clips[clip_id] = clip
+        return clip
+
+    # 1) Zero-engagement clip must be excluded from both featured and most_viewed
+    add_clip(
+        slug="zero-clip",
+        title="Sem Interacao",
+        likes=0,
+        favorites=0,
+        views=0,
+        created_at=now,
+    )
+    # 2) More favorites -> wins featured all-time (4*2 + 2 = 10 > 0*2 + 7 = 7)
+    fav_heavy = add_clip(
+        slug="fav-heavy",
+        title="Favoritado Historico",
+        likes=2,
+        favorites=4,
+        views=50,
+        created_at=now - timedelta(days=5),
+    )
+    # 3) Higher likes, fewer favorites, recent interactions within 7d
+    recent_hero = add_clip(
+        slug="recent-hero",
+        title="Destaque da Semana",
+        likes=7,
+        favorites=0,
+        views=120,
+        created_at=now - timedelta(days=15),
+    )
+    # 4) Views-only clip -> excluded from featured, ranked #1 in most_viewed all-time
+    most_viewed_all = add_clip(
+        slug="views-only",
+        title="Mais Visto Geral",
+        likes=0,
+        favorites=0,
+        views=300,
+        created_at=now - timedelta(days=25),
+    )
+
+    # Temporal events: fav_heavy had interactions 12 days ago; recent_hero had 2 favs 2 days ago
+    old_ts = now - timedelta(days=12)
+    recent_ts = now - timedelta(days=2)
+    for _ in range(4):
+        store.favorite_events.append((fav_heavy.id, other.id, old_ts))
+    for _ in range(2):
+        store.like_events.append((fav_heavy.id, other.id, old_ts))
+
+    for _ in range(2):
+        store.favorite_events.append((recent_hero.id, other.id, recent_ts))
+    for _ in range(5):
+        store.like_events.append((recent_hero.id, other.id, recent_ts))
+
+    # View events: fav_heavy got 10 views in last 7d, most_viewed_all got 30 views 15 days ago
+    for _ in range(10):
+        store.view_events.append((fav_heavy.id, None, recent_ts))
+    for _ in range(30):
+        store.view_events.append((most_viewed_all.id, None, old_ts))
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        # Featured All Time: fav_heavy (#1) then recent_hero (#2); zero-clip & views-only excluded
+        featured_all = await client.get("/api/v1/clips?sort=featured&period=all")
+        assert featured_all.status_code == status.HTTP_200_OK
+        all_items = featured_all.json()["items"]
+        assert [item["slug"] for item in all_items] == ["fav-heavy", "recent-hero"]
+        assert [item["is_top_highlight"] for item in all_items] == [True, False]
+
+        # Featured 7d: recent_hero (#1 in 7d) is promoted; 12d old interactions are excluded
+        featured_7d = await client.get("/api/v1/clips?sort=featured&period=7d")
+        assert featured_7d.status_code == status.HTTP_200_OK
+        items_7d = featured_7d.json()["items"]
+        assert [item["slug"] for item in items_7d] == ["recent-hero"]
+        assert items_7d[0]["is_top_highlight"] is True
+
+        # Most Viewed All Time: views-only (#1), recent-hero (#2), fav-heavy (#3)
+        mv_all = await client.get("/api/v1/clips?sort=most_viewed&period=all")
+        assert mv_all.status_code == status.HTTP_200_OK
+        mv_all_items = mv_all.json()["items"]
+        assert [item["slug"] for item in mv_all_items] == [
+            "views-only",
+            "recent-hero",
+            "fav-heavy",
+        ]
+        # Top highlight badge still belongs only to global #1 highlight (fav-heavy)
+        assert [item["is_top_highlight"] for item in mv_all_items] == [False, False, True]
+
+        # Most Viewed 7d: only fav_heavy has views in last 7 days
+        mv_7d = await client.get("/api/v1/clips?sort=most_viewed&period=7d")
+        assert mv_7d.status_code == status.HTTP_200_OK
+        assert [item["slug"] for item in mv_7d.json()["items"]] == ["fav-heavy"]
+
+        # Recent pagination page 2 does NOT award a fake highlight badge
+        page_2 = await client.get("/api/v1/clips?sort=recent&page=2&page_size=2")
+        assert page_2.status_code == status.HTTP_200_OK
+        assert all(item["is_top_highlight"] is False for item in page_2.json()["items"])
+
+        # Invalid period is rejected with 422
+        invalid_period = await client.get("/api/v1/clips?sort=featured&period=99d")
+        assert invalid_period.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
