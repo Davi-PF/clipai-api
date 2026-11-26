@@ -253,3 +253,46 @@ async def test_privacy_and_ownership_guards_on_detail_list_update_delete(
     service._clip_repo.delete.assert_awaited_once_with(friends_clip)
     session.commit.assert_awaited()
     storage.delete_objects.assert_awaited_once()
+
+
+async def test_cancel_upload_deletes_pending_and_failed_but_blocks_ready_and_non_owners(
+    test_settings: Settings,
+) -> None:
+    """Cancel pending or failed upload and clean up DB + R2 while protecting ready clips."""
+    service, session, storage = _build_service(test_settings)
+    owner = _make_user()
+    other_user = _make_user()
+    service._clip_repo = AsyncMock()
+
+    service._clip_repo.get_by_id.return_value = None
+    with pytest.raises(AppError) as missing_exc:
+        await service.cancel_upload(uuid4(), owner)
+    assert missing_exc.value.status_code == 404
+
+    pending = _make_clip(owner, status="pending_upload", with_thumb=True)
+    service._clip_repo.get_by_id.return_value = pending
+    with pytest.raises(AppError) as forbid_exc:
+        await service.cancel_upload(pending.id, other_user)
+    assert forbid_exc.value.status_code == 403
+
+    ready_clip = _make_clip(owner, status="ready")
+    service._clip_repo.get_by_id.return_value = ready_clip
+    with pytest.raises(AppError) as ready_exc:
+        await service.cancel_upload(ready_clip.id, owner)
+    assert ready_exc.value.status_code == 400
+    assert ready_exc.value.code == "BAD_REQUEST"
+    service._clip_repo.delete.assert_not_awaited()
+    storage.delete_objects.assert_not_awaited()
+
+    service._clip_repo.get_by_id.return_value = pending
+    await service.cancel_upload(pending.id, owner)
+    service._clip_repo.delete.assert_awaited_once_with(pending)
+    session.commit.assert_awaited_once()
+    storage.delete_objects.assert_awaited_once_with(
+        [pending.video_object_key, pending.thumbnail_object_key]
+    )
+
+    failed_no_thumb = _make_clip(owner, status="failed", with_thumb=False)
+    service._clip_repo.get_by_id.return_value = failed_no_thumb
+    await service.cancel_upload(failed_no_thumb.id, owner)
+    storage.delete_objects.assert_awaited_with([failed_no_thumb.video_object_key])

@@ -634,6 +634,86 @@ async def test_confirm_head_object_failure_and_upload_rate_limit(
         assert limited.json()["error"]["code"] == "RATE_LIMIT_EXCEEDED"
 
 
+async def test_cancel_upload_removes_pending_clip_and_r2_objects_and_guards_ready(
+    clips_test_env: dict[str, Any],
+) -> None:
+    """Verify POST /clips/{id}/cancel-upload cleans DB + R2 and rejects ready/non-owner."""
+    app = clips_test_env["app"]
+    store: _InMemoryClipStore = clips_test_env["store"]
+    storage: MagicMock = clips_test_env["storage"]
+    cs2: Game = clips_test_env["cs2"]
+    owner_headers = {"Authorization": f"Bearer {clips_test_env['owner_token']}"}
+    other_headers = {"Authorization": f"Bearer {clips_test_env['other_token']}"}
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        up = await client.post(
+            "/api/v1/clips/upload-url",
+            headers=owner_headers,
+            json={
+                "title": "Envio cancelado no meio",
+                "game_id": str(cs2.id),
+                "video_mime_type": "video/mp4",
+                "video_size_bytes": 5_000_000,
+                "duration_seconds": 15.0,
+                "thumbnail_mime_type": "image/webp",
+                "thumbnail_size_bytes": 120_000,
+            },
+        )
+        assert up.status_code == status.HTTP_201_CREATED
+        pending_id = up.json()["clip_id"]
+        pending_clip = store.clips[UUID(pending_id)]
+        expected_keys = [pending_clip.video_object_key, pending_clip.thumbnail_object_key]
+
+        forbid_cancel = await client.post(
+            f"/api/v1/clips/{pending_id}/cancel-upload",
+            headers=other_headers,
+        )
+        assert forbid_cancel.status_code == status.HTTP_403_FORBIDDEN
+
+        cancel_resp = await client.post(
+            f"/api/v1/clips/{pending_id}/cancel-upload",
+            headers=owner_headers,
+        )
+        assert cancel_resp.status_code == status.HTTP_204_NO_CONTENT
+        assert UUID(pending_id) not in store.clips
+        storage.delete_objects.assert_awaited_with(expected_keys)
+
+        missing_cancel = await client.post(
+            f"/api/v1/clips/{pending_id}/cancel-upload",
+            headers=owner_headers,
+        )
+        assert missing_cancel.status_code == status.HTTP_404_NOT_FOUND
+
+        # Ready clips cannot be deleted via cancel-upload
+        up_ready = await client.post(
+            "/api/v1/clips/upload-url",
+            headers=owner_headers,
+            json={
+                "title": "Envio finalizado",
+                "game_id": str(cs2.id),
+                "video_mime_type": "video/mp4",
+                "video_size_bytes": 5_000_000,
+                "duration_seconds": 15.0,
+            },
+        )
+        ready_id = up_ready.json()["clip_id"]
+        confirm_resp = await client.post(
+            f"/api/v1/clips/{ready_id}/confirm-upload",
+            headers=owner_headers,
+        )
+        assert confirm_resp.status_code == status.HTTP_200_OK
+
+        cancel_ready = await client.post(
+            f"/api/v1/clips/{ready_id}/cancel-upload",
+            headers=owner_headers,
+        )
+        assert cancel_ready.status_code == status.HTTP_400_BAD_REQUEST
+        assert cancel_ready.json()["error"]["code"] == "BAD_REQUEST"
+        assert UUID(ready_id) in store.clips
+
+
 def _upload_verification_error() -> Exception:
     from app.core.exceptions import AppError
 
