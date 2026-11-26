@@ -223,3 +223,62 @@ async def test_clip_service_social_and_collection_filter_guards(
     with pytest.raises(AppError) as anon_view:
         await service.register_view(friends_clip.id, current_user=None)
     assert anon_view.value.status_code == 401
+
+
+async def test_collection_detail_restricts_clip_technical_metadata_to_clip_owner() -> None:
+    """Return file_size_bytes and technical_metadata in collection clips only to clip owners."""
+    session = AsyncMock(spec=AsyncSession)
+    storage = _make_storage_mock()
+    service = CollectionService(session=session, storage_service=storage)
+    owner = _make_user("owner")
+    other = _make_user("other")
+    now = datetime.now(UTC)
+
+    public_coll = Collection(
+        id=uuid4(),
+        user_id=owner.id,
+        title="Destaques",
+        description=None,
+        privacy="public",
+        accent_color="#2EB886",
+        owner=owner,
+        created_at=now,
+        updated_at=now,
+    )
+    owner_clip = _make_clip(owner, status="ready", privacy="public")
+    other_clip = _make_clip(other, status="ready", privacy="public")
+    links = [
+        CollectionClip(
+            collection_id=public_coll.id,
+            clip_id=owner_clip.id,
+            position=0,
+            added_at=now,
+            clip=owner_clip,
+        ),
+        CollectionClip(
+            collection_id=public_coll.id,
+            clip_id=other_clip.id,
+            position=1,
+            added_at=now,
+            clip=other_clip,
+        ),
+    ]
+
+    service._collection_repo = AsyncMock()
+    service._clip_repo = AsyncMock()
+    service._collection_repo.get_by_id.return_value = public_coll
+    service._collection_repo.list_collection_clips.return_value = (links, 2)
+    service._clip_repo.get_user_liked_clip_ids.return_value = set()
+    service._clip_repo.get_user_favorited_clip_ids.return_value = set()
+
+    owner_view = await service.get_collection_detail(public_coll.id, current_user=owner)
+    assert owner_view.clips[0].clip.file_size_bytes == 2_000_000
+    assert owner_view.clips[0].clip.technical_metadata is not None
+    assert owner_view.clips[0].clip.duration_seconds == 25.0
+    assert owner_view.clips[1].clip.file_size_bytes is None
+    assert owner_view.clips[1].clip.technical_metadata is None
+
+    anon_view = await service.get_collection_detail(public_coll.id, current_user=None)
+    assert all(item.clip.file_size_bytes is None for item in anon_view.clips)
+    assert all(item.clip.technical_metadata is None for item in anon_view.clips)
+    assert all(item.clip.duration_seconds == 25.0 for item in anon_view.clips)
