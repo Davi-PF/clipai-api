@@ -10,6 +10,8 @@ from app.schemas.user import enrich_user_payload
 
 ClipPrivacy = Literal["public", "friends", "unlisted"]
 ClipStatus = Literal["pending_upload", "ready", "failed"]
+ClipSortOption = Literal["recent", "popular", "featured", "most_viewed"]
+ClipPeriod = Literal["7d", "30d", "all"]
 
 
 class TechnicalMetadataSchema(BaseModel):
@@ -143,6 +145,7 @@ class ClipSummaryResponse(BaseModel):
     is_favorited: bool = False
     is_liked_by_me: bool = False
     is_favorited_by_me: bool = False
+    is_top_highlight: bool = False
     author: ClipAuthorSummary
     game: ClipGameSummary | None
     tags: list[str]

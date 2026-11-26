@@ -1,6 +1,5 @@
 """Clips upload, discovery, and CRUD HTTP router (/api/v1/clips)."""
 
-from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request, status
@@ -19,6 +18,8 @@ from app.schemas.clip import (
     ClipDetailResponse,
     ClipFavoriteResponse,
     ClipLikeResponse,
+    ClipPeriod,
+    ClipSortOption,
     ClipSummaryResponse,
     ClipUpdateRequest,
     ClipViewResponse,
@@ -133,7 +134,8 @@ async def list_clips(
     mine: bool = Query(default=False),
     favorited: bool = Query(default=False),
     collection_id: UUID | None = Query(default=None),
-    sort: Literal["recent", "popular", "featured"] = Query(default="recent"),
+    sort: ClipSortOption = Query(default="recent"),
+    period: ClipPeriod = Query(default="all"),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=50),
     current_user: User | None = Depends(get_optional_user),
@@ -151,6 +153,7 @@ async def list_clips(
         favorited=favorited,
         collection_id=collection_id,
         sort=sort,
+        period=period,
         page=page,
         page_size=page_size,
         current_user=current_user,

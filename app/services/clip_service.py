@@ -225,11 +225,12 @@ class ClipService:
         favorited: bool = False,
         collection_id: UUID | None = None,
         sort: str = "recent",
+        period: str = "all",
         page: int = 1,
         page_size: int = 20,
         current_user: User | None = None,
     ) -> PaginatedResponse[ClipSummaryResponse]:
-        """List ready clips applying search, filters, privacy, and interaction state."""
+        """List ready clips applying search, filters, privacy, period, and interaction state."""
         if (mine or favorited) and current_user is None:
             raise AppError(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -245,6 +246,7 @@ class ClipService:
             game_id=game_id,
             game_slug=game_slug,
         )
+        current_user_id = current_user.id if current_user else None
         clips, total = await self._clip_repo.list_clips(
             q=q,
             game_id=resolved_game_id,
@@ -254,18 +256,27 @@ class ClipService:
             mine=mine,
             favorited_by_user_id=current_user.id if (favorited and current_user) else None,
             collection_id=collection_id,
-            current_user_id=current_user.id if current_user else None,
+            current_user_id=current_user_id,
             sort=sort,
+            period=period,
             page=page,
             page_size=page_size,
         )
         liked_ids, favorited_ids = await self._load_user_interaction_sets(clips, current_user)
+        top_highlight_id: UUID | None = None
+        if clips:
+            highlight_period = period if sort == "featured" else "all"
+            top_highlight_id = await self._clip_repo.get_top_highlight_clip_id(
+                current_user_id=current_user_id,
+                period=highlight_period,
+            )
         return PaginatedResponse.create(
             items=[
                 self._to_summary_response(
                     clip,
                     is_liked=clip.id in liked_ids,
                     is_favorited=clip.id in favorited_ids,
+                    is_top_highlight=top_highlight_id is not None and clip.id == top_highlight_id,
                 )
                 for clip in clips
             ],
@@ -361,9 +372,12 @@ class ClipService:
         clip_id: UUID,
         current_user: User | None = None,
     ) -> ClipViewResponse:
-        """Atomically increment views_count for a ready accessible clip."""
+        """Record a view event and atomically increment views_count for a ready clip."""
         clip = await self._get_readable_ready_clip(clip_id, current_user)
-        views_count = await self._clip_repo.increment_views(clip.id)
+        views_count = await self._clip_repo.increment_views(
+            clip.id,
+            viewer_id=current_user.id if current_user else None,
+        )
         await self._session.commit()
         return ClipViewResponse(clip_id=clip.id, views_count=views_count)
 
@@ -572,6 +586,7 @@ class ClipService:
         *,
         is_liked: bool = False,
         is_favorited: bool = False,
+        is_top_highlight: bool = False,
     ) -> ClipSummaryResponse:
         return ClipSummaryResponse(
             id=clip.id,
@@ -592,6 +607,7 @@ class ClipService:
             is_favorited=is_favorited,
             is_liked_by_me=is_liked,
             is_favorited_by_me=is_favorited,
+            is_top_highlight=is_top_highlight,
             author=ClipAuthorSummary.model_validate(clip.author),
             game=ClipGameSummary.model_validate(clip.game) if clip.game else None,
             tags=[tag.slug for tag in clip.tags],
