@@ -7,10 +7,11 @@ from fastapi import status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AppError
-from app.models.collection import Collection
+from app.models.collection import Collection, CollectionClip
 from app.models.user import User
 from app.repositories.clip_repository import ClipRepository
 from app.repositories.collection_repository import CollectionRepository
+from app.schemas.clip import resolve_owner_clip_metadata
 from app.schemas.collection import (
     CollectionAddClipRequest,
     CollectionAddClipResponse,
@@ -137,27 +138,11 @@ class CollectionService:
         )
 
         clip_items = [
-            CollectionClipItemResponse(
-                position=link.position,
-                added_at=link.added_at,
-                clip=CollectionClipCardResponse(
-                    id=link.clip.id,
-                    slug=link.clip.slug,
-                    title=link.clip.title,
-                    video_url=self._storage.build_public_url(link.clip.video_object_key),
-                    thumbnail_url=(
-                        self._storage.build_public_url(link.clip.thumbnail_object_key)
-                        if link.clip.thumbnail_object_key
-                        else None
-                    ),
-                    duration_seconds=float(link.clip.duration_seconds),
-                    views_count=link.clip.views_count,
-                    likes_count=link.clip.likes_count,
-                    is_liked=link.clip.id in liked_ids,
-                    is_favorited=link.clip.id in favorited_ids,
-                    is_liked_by_me=link.clip.id in liked_ids,
-                    is_favorited_by_me=link.clip.id in favorited_ids,
-                ),
+            self._to_clip_item_response(
+                link,
+                current_user_id=current_user_id,
+                liked_ids=liked_ids,
+                favorited_ids=favorited_ids,
             )
             for link in links
         ]
@@ -294,6 +279,45 @@ class CollectionService:
             status_code=status.HTTP_404_NOT_FOUND,
             code="RESOURCE_NOT_FOUND",
             message="A coleção solicitada não foi encontrada.",
+        )
+
+    def _to_clip_item_response(
+        self,
+        link: CollectionClip,
+        *,
+        current_user_id: UUID | None,
+        liked_ids: set[UUID],
+        favorited_ids: set[UUID],
+    ) -> CollectionClipItemResponse:
+        file_size_bytes, technical_metadata = resolve_owner_clip_metadata(
+            clip_user_id=link.clip.user_id,
+            file_size_bytes=link.clip.file_size_bytes,
+            technical_metadata=link.clip.technical_metadata,
+            current_user_id=current_user_id,
+        )
+        return CollectionClipItemResponse(
+            position=link.position,
+            added_at=link.added_at,
+            clip=CollectionClipCardResponse(
+                id=link.clip.id,
+                slug=link.clip.slug,
+                title=link.clip.title,
+                video_url=self._storage.build_public_url(link.clip.video_object_key),
+                thumbnail_url=(
+                    self._storage.build_public_url(link.clip.thumbnail_object_key)
+                    if link.clip.thumbnail_object_key
+                    else None
+                ),
+                file_size_bytes=file_size_bytes,
+                duration_seconds=float(link.clip.duration_seconds),
+                technical_metadata=technical_metadata,
+                views_count=link.clip.views_count,
+                likes_count=link.clip.likes_count,
+                is_liked=link.clip.id in liked_ids,
+                is_favorited=link.clip.id in favorited_ids,
+                is_liked_by_me=link.clip.id in liked_ids,
+                is_favorited_by_me=link.clip.id in favorited_ids,
+            ),
         )
 
     def _to_summary_response(

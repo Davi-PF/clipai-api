@@ -25,9 +25,9 @@ from app.schemas.clip import (
     ClipUpdateRequest,
     ClipViewResponse,
     PresignedUploadTarget,
-    TechnicalMetadataSchema,
     UploadUrlRequest,
     UploadUrlResponse,
+    resolve_owner_clip_metadata,
 )
 from app.schemas.common import PaginatedResponse
 from app.schemas.game import GameResponse, TagListResponse, TagResponse
@@ -199,7 +199,7 @@ class ClipService:
         clip.status = "ready"
         await self._session.commit()
         refreshed = await self._clip_repo.get_by_id(clip.id)
-        return self._to_detail_response(refreshed or clip)
+        return self._to_detail_response(refreshed or clip, current_user=current_user)
 
     async def cancel_upload(self, clip_id: UUID, current_user: User) -> None:
         """Cancel an unconfirmed upload, deleting the DB row and any R2 objects."""
@@ -274,6 +274,7 @@ class ClipService:
             items=[
                 self._to_summary_response(
                     clip,
+                    current_user=current_user,
                     is_liked=clip.id in liked_ids,
                     is_favorited=clip.id in favorited_ids,
                     is_top_highlight=top_highlight_id is not None and clip.id == top_highlight_id,
@@ -309,6 +310,7 @@ class ClipService:
         liked_ids, favorited_ids = await self._load_user_interaction_sets([clip], current_user)
         return self._to_detail_response(
             clip,
+            current_user=current_user,
             is_liked=clip.id in liked_ids,
             is_favorited=clip.id in favorited_ids,
         )
@@ -406,7 +408,7 @@ class ClipService:
 
         await self._session.commit()
         refreshed = await self._clip_repo.get_by_id(clip.id)
-        return self._to_detail_response(refreshed or clip)
+        return self._to_detail_response(refreshed or clip, current_user=current_user)
 
     async def delete_clip(self, clip_id: UUID, current_user: User) -> None:
         """Delete clip from PostgreSQL and remove media objects from Cloudflare R2."""
@@ -584,10 +586,17 @@ class ClipService:
         self,
         clip: Clip,
         *,
+        current_user: User | None = None,
         is_liked: bool = False,
         is_favorited: bool = False,
         is_top_highlight: bool = False,
     ) -> ClipSummaryResponse:
+        file_size_bytes, technical_metadata = resolve_owner_clip_metadata(
+            clip_user_id=clip.user_id,
+            file_size_bytes=clip.file_size_bytes,
+            technical_metadata=clip.technical_metadata,
+            current_user_id=current_user.id if current_user is not None else None,
+        )
         return ClipSummaryResponse(
             id=clip.id,
             slug=clip.slug,
@@ -599,7 +608,9 @@ class ClipService:
                 if clip.thumbnail_object_key
                 else None
             ),
+            file_size_bytes=file_size_bytes,
             duration_seconds=float(clip.duration_seconds),
+            technical_metadata=technical_metadata,
             views_count=clip.views_count,
             likes_count=clip.likes_count,
             favorites_count=clip.favorites_count,
@@ -618,9 +629,16 @@ class ClipService:
         self,
         clip: Clip,
         *,
+        current_user: User | None = None,
         is_liked: bool = False,
         is_favorited: bool = False,
     ) -> ClipDetailResponse:
+        file_size_bytes, technical_metadata = resolve_owner_clip_metadata(
+            clip_user_id=clip.user_id,
+            file_size_bytes=clip.file_size_bytes,
+            technical_metadata=clip.technical_metadata,
+            current_user_id=current_user.id if current_user is not None else None,
+        )
         return ClipDetailResponse(
             id=clip.id,
             slug=clip.slug,
@@ -634,12 +652,10 @@ class ClipService:
                 if clip.thumbnail_object_key
                 else None
             ),
-            file_size_bytes=clip.file_size_bytes,
+            file_size_bytes=file_size_bytes,
             duration_seconds=float(clip.duration_seconds),
             mime_type=clip.mime_type,
-            technical_metadata=TechnicalMetadataSchema.model_validate(
-                clip.technical_metadata or {}
-            ),
+            technical_metadata=technical_metadata,
             views_count=clip.views_count,
             likes_count=clip.likes_count,
             favorites_count=clip.favorites_count,

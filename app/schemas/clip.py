@@ -137,7 +137,9 @@ class ClipSummaryResponse(BaseModel):
     privacy: ClipPrivacy
     video_url: str
     thumbnail_url: str | None
+    file_size_bytes: int | None = None
     duration_seconds: float
+    technical_metadata: TechnicalMetadataSchema | None = None
     views_count: int
     likes_count: int
     favorites_count: int
@@ -165,10 +167,10 @@ class ClipDetailResponse(BaseModel):
     privacy: ClipPrivacy
     video_url: str
     thumbnail_url: str | None
-    file_size_bytes: int
+    file_size_bytes: int | None = None
     duration_seconds: float
     mime_type: str
-    technical_metadata: TechnicalMetadataSchema
+    technical_metadata: TechnicalMetadataSchema | None = None
     views_count: int
     likes_count: int
     favorites_count: int
@@ -181,6 +183,19 @@ class ClipDetailResponse(BaseModel):
     tags: list[str]
     created_at: datetime
     updated_at: datetime
+
+
+def resolve_owner_clip_metadata(
+    *,
+    clip_user_id: UUID,
+    file_size_bytes: int,
+    technical_metadata: dict[str, Any] | None,
+    current_user_id: UUID | None,
+) -> tuple[int | None, TechnicalMetadataSchema | None]:
+    """Return file_size_bytes and technical_metadata only when requester owns the clip."""
+    if current_user_id is None or current_user_id != clip_user_id:
+        return None, None
+    return file_size_bytes, TechnicalMetadataSchema.model_validate(technical_metadata or {})
 
 
 class ClipLikeResponse(BaseModel):
