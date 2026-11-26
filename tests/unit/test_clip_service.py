@@ -346,3 +346,51 @@ async def test_list_clips_forwards_period_and_marks_only_top_highlight(
     assert view_res.views_count == 11
     service._clip_repo.increment_views.assert_awaited_once_with(top_clip.id, viewer_id=owner.id)
     session.commit.assert_awaited_once()
+
+
+async def test_technical_metadata_and_file_size_restricted_to_owner(
+    test_settings: Settings,
+) -> None:
+    """Expose technical_metadata and file_size_bytes solely to the clip owner."""
+    service, _session, _storage = _build_service(test_settings)
+    owner = _make_user()
+    other_user = _make_user()
+    clip = _make_clip(owner, status="ready", privacy="public")
+
+    service._clip_repo = AsyncMock()
+    service._clip_repo.get_by_identifier.return_value = clip
+    service._clip_repo.list_clips.return_value = ([clip], 1)
+    service._clip_repo.get_user_liked_clip_ids.return_value = set()
+    service._clip_repo.get_user_favorited_clip_ids.return_value = set()
+    service._clip_repo.get_top_highlight_clip_id.return_value = None
+
+    owner_detail = await service.get_clip_detail(clip.slug, owner)
+    assert owner_detail.file_size_bytes == 5_000_000
+    assert owner_detail.technical_metadata is not None
+    assert owner_detail.technical_metadata.codec == "h264"
+    assert owner_detail.duration_seconds == 30.0
+
+    other_detail = await service.get_clip_detail(clip.slug, other_user)
+    assert other_detail.file_size_bytes is None
+    assert other_detail.technical_metadata is None
+    assert other_detail.duration_seconds == 30.0
+
+    anon_detail = await service.get_clip_detail(clip.slug, None)
+    assert anon_detail.file_size_bytes is None
+    assert anon_detail.technical_metadata is None
+    assert anon_detail.duration_seconds == 30.0
+
+    owner_list = await service.list_clips(current_user=owner)
+    assert owner_list.items[0].file_size_bytes == 5_000_000
+    assert owner_list.items[0].technical_metadata is not None
+    assert owner_list.items[0].technical_metadata.codec == "h264"
+
+    other_list = await service.list_clips(current_user=other_user)
+    assert other_list.items[0].file_size_bytes is None
+    assert other_list.items[0].technical_metadata is None
+    assert other_list.items[0].duration_seconds == 30.0
+
+    anon_list = await service.list_clips(current_user=None)
+    assert anon_list.items[0].file_size_bytes is None
+    assert anon_list.items[0].technical_metadata is None
+    assert anon_list.items[0].duration_seconds == 30.0

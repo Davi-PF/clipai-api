@@ -952,3 +952,103 @@ async def test_featured_most_viewed_period_filtering_and_top_highlight_flag(
         # Invalid period is rejected with 422
         invalid_period = await client.get("/api/v1/clips?sort=featured&period=99d")
         assert invalid_period.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+
+
+async def test_technical_metadata_and_file_size_restricted_to_clip_owner(
+    clips_test_env: dict[str, Any],
+) -> None:
+    """Expose technical_metadata and file_size_bytes only to clip owner on detail and list."""
+    app = clips_test_env["app"]
+    cs2: Game = clips_test_env["cs2"]
+    owner_headers = {"Authorization": f"Bearer {clips_test_env['owner_token']}"}
+    other_headers = {"Authorization": f"Bearer {clips_test_env['other_token']}"}
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        up_resp = await client.post(
+            "/api/v1/clips/upload-url",
+            headers=owner_headers,
+            json={
+                "title": "Ace na Overpass",
+                "game_id": str(cs2.id),
+                "privacy": "public",
+                "tags": ["ace"],
+                "video_mime_type": "video/mp4",
+                "video_size_bytes": 12_000_000,
+                "duration_seconds": 32.5,
+                "technical_metadata": {
+                    "codec": "h264",
+                    "container": "mp4",
+                    "width": 1920,
+                    "height": 1080,
+                    "resolution_label": "1080p",
+                    "fps": 60,
+                    "bitrate_kbps": 11180,
+                    "audio_codec": "aac",
+                    "audio_channels": 2,
+                    "aspect_ratio": "16:9",
+                },
+            },
+        )
+        assert up_resp.status_code == status.HTTP_201_CREATED
+        clip_id = up_resp.json()["clip_id"]
+        slug = up_resp.json()["slug"]
+
+        confirm_resp = await client.post(
+            f"/api/v1/clips/{clip_id}/confirm-upload",
+            headers=owner_headers,
+        )
+        assert confirm_resp.status_code == status.HTTP_200_OK
+        assert confirm_resp.json()["file_size_bytes"] == 12_000_000
+        assert confirm_resp.json()["technical_metadata"]["codec"] == "h264"
+
+        # 1) Owner receives technical_metadata and file_size_bytes on detail and list
+        owner_detail = await client.get(f"/api/v1/clips/{slug}", headers=owner_headers)
+        assert owner_detail.status_code == status.HTTP_200_OK
+        owner_detail_json = owner_detail.json()
+        assert owner_detail_json["file_size_bytes"] == 12_000_000
+        assert owner_detail_json["technical_metadata"] is not None
+        assert owner_detail_json["technical_metadata"]["resolution_label"] == "1080p"
+        assert owner_detail_json["duration_seconds"] == 32.5
+
+        owner_list = await client.get("/api/v1/clips", headers=owner_headers)
+        assert owner_list.status_code == status.HTTP_200_OK
+        owner_item = owner_list.json()["items"][0]
+        assert owner_item["slug"] == slug
+        assert owner_item["file_size_bytes"] == 12_000_000
+        assert owner_item["technical_metadata"] is not None
+        assert owner_item["technical_metadata"]["codec"] == "h264"
+        assert owner_item["duration_seconds"] == 32.5
+
+        # 2) Other authenticated user receives None on detail and list
+        other_detail = await client.get(f"/api/v1/clips/{slug}", headers=other_headers)
+        assert other_detail.status_code == status.HTTP_200_OK
+        other_detail_json = other_detail.json()
+        assert other_detail_json["file_size_bytes"] is None
+        assert other_detail_json["technical_metadata"] is None
+        assert other_detail_json["duration_seconds"] == 32.5
+
+        other_list = await client.get("/api/v1/clips", headers=other_headers)
+        assert other_list.status_code == status.HTTP_200_OK
+        other_item = other_list.json()["items"][0]
+        assert other_item["slug"] == slug
+        assert other_item["file_size_bytes"] is None
+        assert other_item["technical_metadata"] is None
+        assert other_item["duration_seconds"] == 32.5
+
+        # 3) Anonymous visitor receives None on detail and list
+        anon_detail = await client.get(f"/api/v1/clips/{slug}")
+        assert anon_detail.status_code == status.HTTP_200_OK
+        anon_detail_json = anon_detail.json()
+        assert anon_detail_json["file_size_bytes"] is None
+        assert anon_detail_json["technical_metadata"] is None
+        assert anon_detail_json["duration_seconds"] == 32.5
+
+        anon_list = await client.get("/api/v1/clips")
+        assert anon_list.status_code == status.HTTP_200_OK
+        anon_item = anon_list.json()["items"][0]
+        assert anon_item["slug"] == slug
+        assert anon_item["file_size_bytes"] is None
+        assert anon_item["technical_metadata"] is None
+        assert anon_item["duration_seconds"] == 32.5

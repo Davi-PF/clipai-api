@@ -649,6 +649,24 @@ async def test_collections_crud_clip_membership_and_cascade_on_clip_delete(
             str(clip_a.id),
             str(clip_b.id),
         ]
+        assert detail.json()["clips"][0]["clip"]["file_size_bytes"] == 4_000_000
+        assert detail.json()["clips"][0]["clip"]["technical_metadata"] is not None
+
+        # Non-owner and anonymous receive None for technical_metadata and file_size_bytes
+        other_coll_detail = await client.get(
+            f"/api/v1/collections/{coll_id}",
+            headers=other_headers,
+        )
+        assert other_coll_detail.status_code == status.HTTP_200_OK
+        assert other_coll_detail.json()["clips"][0]["clip"]["file_size_bytes"] is None
+        assert other_coll_detail.json()["clips"][0]["clip"]["technical_metadata"] is None
+        assert other_coll_detail.json()["clips"][0]["clip"]["duration_seconds"] == 22.5
+
+        anon_coll_detail = await client.get(f"/api/v1/collections/{coll_id}")
+        assert anon_coll_detail.status_code == status.HTTP_200_OK
+        assert anon_coll_detail.json()["clips"][0]["clip"]["file_size_bytes"] is None
+        assert anon_coll_detail.json()["clips"][0]["clip"]["technical_metadata"] is None
+        assert anon_coll_detail.json()["clips"][0]["clip"]["duration_seconds"] == 22.5
 
         # Owner edits collection
         patch_resp = await client.patch(

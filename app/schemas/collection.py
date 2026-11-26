@@ -7,7 +7,7 @@ from uuid import UUID
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.schemas.clip import ClipPrivacy
+from app.schemas.clip import ClipPrivacy, TechnicalMetadataSchema
 from app.schemas.user import enrich_user_payload
 
 _HEX_COLOR_PATTERN = re.compile(r"^#[0-9A-Fa-f]{6}$")
@@ -141,7 +141,9 @@ class CollectionClipCardResponse(BaseModel):
     title: str
     video_url: str
     thumbnail_url: str | None
+    file_size_bytes: int | None = None
     duration_seconds: float
+    technical_metadata: TechnicalMetadataSchema | None = None
     views_count: int
     likes_count: int
     is_liked: bool = False
