@@ -15,6 +15,7 @@ from app.routers.clips import router as clips_router
 from app.routers.collections import router as collections_router
 from app.routers.games import router as games_router
 from app.routers.health import router as health_router
+from app.routers.notifications import router as notifications_router
 from app.routers.tags import router as tags_router
 from app.routers.users import router as users_router
 
@@ -63,6 +64,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(clips_router, prefix=resolved_settings.api_v1_prefix)
     application.include_router(collections_router, prefix=resolved_settings.api_v1_prefix)
     application.include_router(analytics_router, prefix=resolved_settings.api_v1_prefix)
+    application.include_router(notifications_router, prefix=resolved_settings.api_v1_prefix)
 
     return application
 
