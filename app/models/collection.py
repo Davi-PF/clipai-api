@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -33,10 +34,16 @@ class Collection(TimestampMixin, Base):
     __tablename__ = "collections"
     __table_args__ = (
         CheckConstraint(
-            "privacy IN ('public', 'friends', 'unlisted')",
+            "privacy IN ('public', 'friends', 'private', 'unlisted')",
             name="privacy_valid",
         ),
         Index("ix_collections_user_privacy", "user_id", "privacy", desc("created_at")),
+        Index(
+            "ix_collections_user_profile",
+            "user_id",
+            "show_on_profile",
+            desc("created_at"),
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(
@@ -57,6 +64,12 @@ class Collection(TimestampMixin, Base):
         nullable=False,
         default="public",
         server_default=text("'public'"),
+    )
+    show_on_profile: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
     )
     accent_color: Mapped[str | None] = mapped_column(String(7), nullable=True)
 

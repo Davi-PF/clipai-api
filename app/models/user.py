@@ -23,6 +23,10 @@ class User(TimestampMixin, Base):
             "avatar_source IN ('custom', 'discord', 'none')",
             name="avatar_source_valid",
         ),
+        CheckConstraint(
+            "collections_visibility IN ('public', 'friends', 'private')",
+            name="collections_visibility_valid",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(
@@ -44,6 +48,12 @@ class User(TimestampMixin, Base):
         server_default=text("'none'"),
     )
     bio: Mapped[str | None] = mapped_column(String(240), nullable=True)
+    collections_visibility: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="public",
+        server_default=text("'public'"),
+    )
     is_email_verified: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
