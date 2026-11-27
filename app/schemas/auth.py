@@ -38,6 +38,16 @@ class RegisterRequest(BaseModel):
     email: EmailStr
     password: str
     display_name: str | None = Field(default=None, max_length=50)
+    invite_code: str | None = Field(default=None, max_length=16)
+
+    @field_validator("invite_code")
+    @classmethod
+    def normalize_invite_code(cls, value: str | None) -> str | None:
+        """Trim whitespace from optional invite_code and convert blank to None."""
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
 
     @field_validator("username")
     @classmethod
