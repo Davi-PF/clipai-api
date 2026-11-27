@@ -296,6 +296,9 @@ async def test_collection_service_profile_showcase_and_private_collection_guards
 
     service._user_repo = AsyncMock()
     service._collection_repo = AsyncMock()
+    no_friend_res = MagicMock()
+    no_friend_res.scalar_one_or_none.return_value = None
+    session.execute.return_value = no_friend_res
 
     # Unknown user returns 404
     service._user_repo.get_by_username.return_value = None
@@ -338,6 +341,9 @@ async def test_collection_service_profile_showcase_and_private_collection_guards
     assert item.cover_thumbnail_url == "https://cdn.clipai.test/clips/u/c1/thumb.webp"
 
     # Direct access to private collection blocks non-owner with 403 FORBIDDEN
+    no_friend_res = MagicMock()
+    no_friend_res.scalar_one_or_none.return_value = None
+    session.execute.return_value = no_friend_res
     service._collection_repo.get_by_id.return_value = priv_coll
     with pytest.raises(AppError) as forbid_other:
         await service.get_collection_detail(priv_coll.id, current_user=other)

@@ -37,6 +37,8 @@ from app.core.security import (
     verify_totp_code,
 )
 from app.models.user import User
+from app.repositories.friendship_repository import FriendshipRepository
+from app.repositories.notification_repository import NotificationRepository
 from app.repositories.refresh_token_repository import RefreshTokenRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.auth import (
@@ -78,6 +80,8 @@ class AuthService:
         self._discord_service = discord_service or DiscordOAuthService(settings)
         self._user_repo = UserRepository(session)
         self._refresh_repo = RefreshTokenRepository(session)
+        self._friendship_repo = FriendshipRepository(session)
+        self._notification_repo = NotificationRepository(session)
 
     async def register(self, payload: RegisterRequest) -> RegisterResponse:
         """Create an unverified user account and send confirmation e-mail."""
@@ -102,6 +106,9 @@ class AuthService:
             display_name=payload.display_name,
         )
 
+        if payload.invite_code:
+            await self._apply_registration_invite(user, payload.invite_code)
+
         verification_token = create_email_verification_token(user.id, self._settings)
         await self._email_service.send_verification_email(
             to_email=user.email,
@@ -118,6 +125,24 @@ class AuthService:
                 "Verifique sua caixa de entrada para confirmar seu e-mail."
             ),
             user=UserRegisteredResponse.model_validate(user),
+        )
+
+    async def _apply_registration_invite(self, new_user: User, invite_code: str) -> None:
+        """Create an accepted friendship and notification when registering via a valid invite."""
+        inviter = await self._user_repo.get_by_invite_code(invite_code)
+        if inviter is None or not inviter.is_active or inviter.id == new_user.id:
+            return
+
+        friendship = await self._friendship_repo.create(
+            requester_id=inviter.id,
+            addressee_id=new_user.id,
+            status="accepted",
+        )
+        await self._notification_repo.create(
+            user_id=inviter.id,
+            actor_id=new_user.id,
+            notification_type="friend_accepted",
+            entity_id=friendship.id,
         )
 
     async def verify_email(self, token: str) -> MessageResponse:

@@ -36,6 +36,10 @@ erDiagram
     users ||--o{ clip_views : "visualiza"
     clips ||--o{ clip_watch_sessions : "gera"
     users ||--o{ clip_watch_sessions : "assiste"
+    users ||--o{ friendships : "solicita"
+    users ||--o{ friendships : "recebe_pedido"
+    users ||--o{ notifications : "recebe"
+    users ||--o{ notifications : "dispara"
 
     users {
         uuid id PK
@@ -48,6 +52,7 @@ erDiagram
         varchar avatar_source
         varchar bio
         varchar collections_visibility
+        varchar invite_code UK
         varchar discord_id UK
         varchar discord_username
         varchar discord_avatar_url
@@ -167,6 +172,25 @@ erDiagram
         timestamptz created_at
         timestamptz updated_at
     }
+
+    friendships {
+        uuid id PK
+        uuid requester_id FK
+        uuid addressee_id FK
+        varchar status
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    notifications {
+        uuid id PK
+        uuid user_id FK
+        uuid actor_id FK
+        varchar type
+        uuid entity_id
+        boolean is_read
+        timestamptz created_at
+    }
 ```
 
 ---
@@ -188,6 +212,7 @@ Armazena as contas de usuários, perfil customizado (avatar no R2), vínculo com
 | `avatar_source` | `VARCHAR(20)` | Não | `'none'` | `CHECK (avatar_source IN ('custom', 'discord', 'none'))` |
 | `bio` | `VARCHAR(240)` | Sim | `NULL` | Biografia do usuário (máximo de 240 caracteres) |
 | `collections_visibility` | `VARCHAR(20)` | Não | `'public'` | `CHECK (collections_visibility IN ('public', 'friends', 'private'))` — Teto Global de visibilidade de coleções no perfil |
+| `invite_code` | `VARCHAR(16)` | Não | — | `UNIQUE` (`ix_users_invite_code`) — Código aleatório URL-safe (12 chars) para links de convite `/invite/{code}` |
 | `discord_id` | `VARCHAR(64)` | Sim | `NULL` | `UNIQUE` (`ix_users_discord_id`) — Snowflake ID da conta Discord vinculada |
 | `discord_username` | `VARCHAR(100)` | Sim | `NULL` | Username da conta Discord vinculada |
 | `discord_avatar_url` | `VARCHAR(512)` | Sim | `NULL` | URL do avatar no CDN do Discord |
@@ -369,6 +394,35 @@ Registro temporal de eventos de visualização de clipes para rankings por janel
 
 ---
 
+### 3.13. `friendships`
+Armazena pedidos de amizade pendentes e amizades aceitas entre pares de usuários. O índice único normalizado `(LEAST(requester_id, addressee_id), GREATEST(requester_id, addressee_id))` impede registros duplicados nos dois sentidos.
+
+| Coluna | Tipo PostgreSQL | Nulo? | Default | Constraints / Observações |
+| :--- | :--- | :---: | :--- | :--- |
+| `id` | `UUID` | Não | `gen_random_uuid()` | `PRIMARY KEY` |
+| `requester_id` | `UUID` | Não | — | `FOREIGN KEY REFERENCES users(id) ON DELETE CASCADE` |
+| `addressee_id` | `UUID` | Não | — | `FOREIGN KEY REFERENCES users(id) ON DELETE CASCADE`; `CHECK (requester_id != addressee_id)` |
+| `status` | `VARCHAR(20)` | Não | `'pending'` | `CHECK (status IN ('pending', 'accepted'))` |
+| `created_at` | `TIMESTAMPTZ` | Não | `now()` | Timestamp de envio do pedido |
+| `updated_at` | `TIMESTAMPTZ` | Não | `now()` | Timestamp da última atualização (ex.: aceite da amizade) |
+
+---
+
+### 3.14. `notifications`
+Caixa de notificações genérica voltada ao usuário destinatário (`user_id`), extensível para eventos futuros (curtidas, comentários, etc.).
+
+| Coluna | Tipo PostgreSQL | Nulo? | Default | Constraints / Observações |
+| :--- | :--- | :---: | :--- | :--- |
+| `id` | `UUID` | Não | `gen_random_uuid()` | `PRIMARY KEY` |
+| `user_id` | `UUID` | Não | — | Destinatário — `FOREIGN KEY REFERENCES users(id) ON DELETE CASCADE` |
+| `actor_id` | `UUID` | Não | — | Usuário que disparou o evento — `FOREIGN KEY REFERENCES users(id) ON DELETE CASCADE` |
+| `type` | `VARCHAR(40)` | Não | — | `CHECK (type IN ('friend_request', 'friend_accepted'))` |
+| `entity_id` | `UUID` | Sim | `NULL` | Identificador opcional da entidade relacionada (ex.: `friendship_id`) |
+| `is_read` | `BOOLEAN` | Não | `false` | Indica se a notificação já foi lida |
+| `created_at` | `TIMESTAMPTZ` | Não | `now()` | Timestamp de criação da notificação |
+
+---
+
 ## 4. Schema do Campo `technical_metadata` (`JSONB`)
 
 A coluna `clips.technical_metadata` armazena propriedades de codificação e resolução extraídas do vídeo no cliente (e extensíveis no Pós-MVP com dados de transcodificação HLS/FFprobe). O payload é validado via Pydantic v2 (`TechnicalMetadataSchema`) antes de ser persistido.
@@ -416,6 +470,7 @@ Todos os índices abaixo devem constar nas migrations do Alembic para garantir c
 CREATE UNIQUE INDEX ix_users_lower_email ON users (LOWER(email));
 CREATE UNIQUE INDEX ix_users_lower_username ON users (LOWER(username));
 CREATE UNIQUE INDEX ix_users_discord_id ON users (discord_id);
+CREATE UNIQUE INDEX ix_users_invite_code ON users (invite_code);
 
 -- 2. Refresh Tokens: lookup rápido por hash, família de rotação e usuário
 CREATE UNIQUE INDEX ix_refresh_tokens_token_hash ON refresh_tokens (token_hash);
@@ -462,4 +517,15 @@ CREATE INDEX ix_clip_views_created_clip ON clip_views (created_at, clip_id);
 CREATE INDEX ix_clip_watch_sessions_clip_id ON clip_watch_sessions (clip_id);
 CREATE INDEX ix_clip_watch_sessions_clip_created ON clip_watch_sessions (clip_id, created_at);
 CREATE INDEX ix_clip_watch_sessions_viewer_id ON clip_watch_sessions (viewer_id);
+
+-- 8. Amizades e Caixa de Notificações
+CREATE UNIQUE INDEX uq_friendships_user_pair
+    ON friendships (LEAST(requester_id, addressee_id), GREATEST(requester_id, addressee_id));
+CREATE INDEX ix_friendships_requester_status ON friendships (requester_id, status);
+CREATE INDEX ix_friendships_addressee_status ON friendships (addressee_id, status);
+
+CREATE INDEX ix_notifications_user_read_created
+    ON notifications (user_id, is_read, created_at DESC);
+CREATE INDEX ix_notifications_user_created ON notifications (user_id, created_at DESC);
+CREATE INDEX ix_notifications_entity_id ON notifications (entity_id);
 ```

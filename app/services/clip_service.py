@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.exceptions import AppError
-from app.core.privacy import ensure_collection_viewable
+from app.core.privacy import are_friends, ensure_clip_viewable, ensure_collection_viewable
 from app.models.clip import Clip
 from app.models.user import User
 from app.repositories.clip_repository import ClipRepository
@@ -301,12 +301,12 @@ class ClipService:
         if clip.status != "ready" and not is_owner:
             raise self._clip_not_found_error()
 
-        if clip.privacy == "friends" and current_user is None:
-            raise AppError(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                code="INVALID_TOKEN",
-                message="Faça login para visualizar clipes restritos a amigos.",
-            )
+        is_friend = (
+            await are_friends(self._session, current_user.id, clip.user_id)
+            if clip.privacy == "friends" and current_user is not None and not is_owner
+            else False
+        )
+        ensure_clip_viewable(clip, current_user, is_friend=is_friend)
 
         liked_ids, favorited_ids = await self._load_user_interaction_sets([clip], current_user)
         return self._to_detail_response(
@@ -539,12 +539,13 @@ class ClipService:
         clip = await self._clip_repo.get_by_id(clip_id)
         if clip is None or clip.status != "ready":
             raise self._clip_not_found_error()
-        if clip.privacy == "friends" and current_user is None:
-            raise AppError(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                code="INVALID_TOKEN",
-                message="Faça login para interagir com clipes restritos a amigos.",
-            )
+        is_owner = current_user is not None and clip.user_id == current_user.id
+        is_friend = (
+            await are_friends(self._session, current_user.id, clip.user_id)
+            if clip.privacy == "friends" and current_user is not None and not is_owner
+            else False
+        )
+        ensure_clip_viewable(clip, current_user, is_friend=is_friend)
         return clip
 
     async def _ensure_collection_readable(
@@ -560,7 +561,17 @@ class ClipService:
                 code="RESOURCE_NOT_FOUND",
                 message="A coleção solicitada não foi encontrada.",
             )
-        ensure_collection_viewable(collection, collection.owner, current_user)
+        is_friend = (
+            await are_friends(self._session, current_user.id, collection.user_id)
+            if current_user is not None and current_user.id != collection.user_id
+            else False
+        )
+        ensure_collection_viewable(
+            collection,
+            collection.owner,
+            current_user,
+            is_friend=is_friend,
+        )
 
     async def _load_user_interaction_sets(
         self,

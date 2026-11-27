@@ -3,12 +3,12 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.clip import Clip
 from app.models.collection import Collection
-from app.models.user import User
+from app.models.user import User, generate_invite_code
 
 
 class UserRepository:
@@ -43,6 +43,62 @@ class UserRepository:
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def get_by_invite_code(self, invite_code: str) -> User | None:
+        """Fetch a user by exact unique invite code."""
+        cleaned = invite_code.strip()
+        if not cleaned:
+            return None
+        stmt = select(User).where(User.invite_code == cleaned)
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def search_users(
+        self,
+        query: str,
+        *,
+        exclude_user_id: UUID,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> tuple[list[User], int]:
+        """Search active users by username, display_name, or discord_username (case-insensitive)."""
+        cleaned = query.strip()
+        handle = cleaned.lstrip("@").strip()
+        if not cleaned and not handle:
+            return [], 0
+
+        patterns = [f"%{cleaned}%"]
+        if handle and handle != cleaned:
+            patterns.append(f"%{handle}%")
+
+        match_clauses = []
+        for pattern in patterns:
+            match_clauses.extend(
+                [
+                    User.username.ilike(pattern),
+                    User.display_name.ilike(pattern),
+                    User.discord_username.ilike(pattern),
+                ]
+            )
+
+        filters = (
+            User.is_active.is_(True),
+            User.id != exclude_user_id,
+            or_(*match_clauses),
+        )
+        count_stmt = select(func.count(User.id)).where(*filters)
+        total = int((await self._session.execute(count_stmt)).scalar_one())
+
+        offset = (page - 1) * page_size
+        items_stmt = (
+            select(User)
+            .where(*filters)
+            .order_by(func.lower(User.username).asc())
+            .offset(offset)
+            .limit(page_size)
+        )
+        items = list((await self._session.execute(items_stmt)).scalars().all())
+        return items, total
+
     async def create(
         self,
         *,
@@ -56,6 +112,7 @@ class UserRepository:
         discord_username: str | None = None,
         discord_avatar_url: str | None = None,
         discord_linked_at: datetime | None = None,
+        invite_code: str | None = None,
     ) -> User:
         """Persist a new user and flush to assign database defaults."""
         avatar_url = discord_avatar_url if avatar_source == "discord" else None
@@ -71,6 +128,7 @@ class UserRepository:
             discord_username=discord_username,
             discord_avatar_url=discord_avatar_url,
             discord_linked_at=discord_linked_at,
+            invite_code=invite_code or generate_invite_code(),
         )
         self._session.add(user)
         await self._session.flush()

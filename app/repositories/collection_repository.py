@@ -8,6 +8,7 @@ from sqlalchemy import Select, and_, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.privacy import is_accepted_friend_clause
 from app.models.clip import Clip
 from app.models.collection import Collection, CollectionClip
 from app.models.user import User
@@ -252,10 +253,15 @@ class CollectionRepository:
                 or_(
                     Collection.user_id == current_user_id,
                     and_(
+                        Collection.privacy == "public",
+                        Collection.owner.has(User.collections_visibility == "public"),
+                    ),
+                    and_(
                         Collection.privacy.in_(["public", "friends"]),
                         Collection.owner.has(
                             User.collections_visibility.in_(["public", "friends"])
                         ),
+                        is_accepted_friend_clause(current_user_id, Collection.user_id),
                     ),
                 )
             )
@@ -271,6 +277,10 @@ class CollectionRepository:
         if current_user_id is None:
             return Clip.privacy.in_(["public", "unlisted"])
         return or_(
-            Clip.privacy.in_(["public", "friends", "unlisted"]),
+            Clip.privacy.in_(["public", "unlisted"]),
             Clip.user_id == current_user_id,
+            and_(
+                Clip.privacy == "friends",
+                is_accepted_friend_clause(current_user_id, Clip.user_id),
+            ),
         )

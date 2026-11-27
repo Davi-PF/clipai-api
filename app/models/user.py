@@ -1,5 +1,6 @@
 """SQLAlchemy 2.0 ORM models for authentication and user accounts."""
 
+import secrets
 from datetime import datetime
 from uuid import UUID, uuid4
 
@@ -11,6 +12,11 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.models.base import Base, TimestampMixin
 
 
+def generate_invite_code() -> str:
+    """Generate a 12-character URL-safe random invite code (fits String(16))."""
+    return secrets.token_urlsafe(9)
+
+
 class User(TimestampMixin, Base):
     """User account model aligned with docs/DATABASE.md."""
 
@@ -19,6 +25,7 @@ class User(TimestampMixin, Base):
         Index("ix_users_lower_email", text("LOWER(email)"), unique=True),
         Index("ix_users_lower_username", text("LOWER(username)"), unique=True),
         Index("ix_users_discord_id", "discord_id", unique=True),
+        Index("ix_users_invite_code", "invite_code", unique=True),
         CheckConstraint(
             "avatar_source IN ('custom', 'discord', 'none')",
             name="avatar_source_valid",
@@ -53,6 +60,11 @@ class User(TimestampMixin, Base):
         nullable=False,
         default="public",
         server_default=text("'public'"),
+    )
+    invite_code: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default=generate_invite_code,
     )
     is_email_verified: Mapped[bool] = mapped_column(
         Boolean,

@@ -10,7 +10,10 @@ from app.core.config import Settings
 from app.core.exceptions import AppError
 from app.core.privacy import allowed_profile_collection_privacies
 from app.models.user import User
+from app.repositories.friendship_repository import FriendshipRepository
 from app.repositories.user_repository import UserRepository
+from app.schemas.common import PaginatedResponse
+from app.schemas.friendship import resolve_friendship_status
 from app.schemas.user import (
     AvatarConfirmRequest,
     AvatarPresignedTarget,
@@ -19,6 +22,7 @@ from app.schemas.user import (
     UserMeResponse,
     UserPublicResponse,
     UserPublicStats,
+    UserSearchItemResponse,
     UserUpdateRequest,
     resolve_display_name,
     resolve_user_avatar_url,
@@ -42,6 +46,7 @@ class UserService:
         self._settings = settings
         self._storage = storage_service
         self._user_repo = UserRepository(session)
+        self._friendship_repo = FriendshipRepository(session)
 
     async def update_profile(
         self,
@@ -145,6 +150,50 @@ class UserService:
 
         return UserMeResponse.model_validate(current_user)
 
+    async def search_users(
+        self,
+        query: str,
+        *,
+        current_user: User,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> PaginatedResponse[UserSearchItemResponse]:
+        """Search active users excluding self and enrich each result with friendship status."""
+        users, total = await self._user_repo.search_users(
+            query,
+            exclude_user_id=current_user.id,
+            page=page,
+            page_size=page_size,
+        )
+        friendships_map = await self._friendship_repo.get_between_user_and_many(
+            current_user.id,
+            [u.id for u in users],
+        )
+        items: list[UserSearchItemResponse] = []
+        for user in users:
+            rel_status, rel_id = resolve_friendship_status(
+                current_user.id,
+                user.id,
+                friendships_map.get(user.id),
+            )
+            discord_linked = bool(user.discord_id)
+            items.append(
+                UserSearchItemResponse(
+                    id=user.id,
+                    username=user.username,
+                    display_name=resolve_display_name(user),
+                    avatar_url=resolve_user_avatar_url(
+                        user,
+                        public_base_url=self._settings.r2_public_base_url,
+                    ),
+                    discord_linked=discord_linked,
+                    discord_username=user.discord_username if discord_linked else None,
+                    friendship_status=rel_status,  # type: ignore[arg-type]
+                    friendship_id=rel_id,
+                )
+            )
+        return PaginatedResponse.create(items=items, page=page, page_size=page_size, total=total)
+
     async def get_public_profile(
         self,
         username: str,
@@ -162,10 +211,20 @@ class UserService:
 
         collections_visibility = user.collections_visibility or "public"
         is_owner = current_user is not None and current_user.id == user.id
+        friendship = (
+            await self._friendship_repo.get_between_users(current_user.id, user.id)
+            if current_user is not None and not is_owner
+            else None
+        )
+        friendship_status, friendship_id = resolve_friendship_status(
+            current_user.id if current_user is not None else None,
+            user.id,
+            friendship,
+        )
         allowed_privacies = allowed_profile_collection_privacies(
             collections_visibility,
             is_owner=is_owner,
-            is_authenticated=current_user is not None,
+            is_friend=(friendship_status == "accepted"),
         )
         raw_stats = await self._user_repo.get_public_stats(
             user.id,
@@ -188,6 +247,8 @@ class UserService:
             discord_linked=discord_linked,
             discord_username=user.discord_username if discord_linked else None,
             collections_visibility=collections_visibility,  # type: ignore[arg-type]
+            friendship_status=friendship_status,
+            friendship_id=friendship_id,
             stats=stats,
             clips_count=stats.clips_count,
             total_views=stats.total_views,
