@@ -15,6 +15,7 @@ from pydantic import (
 )
 
 from app.core.config import get_settings
+from app.core.privacy import CollectionsVisibility
 
 AvatarSource = Literal["custom", "discord", "none"]
 
@@ -76,6 +77,7 @@ def enrich_user_payload(data: Any) -> dict[str, Any]:
             "email": getattr(data, "email", None),
             "display_name": getattr(data, "display_name", None),
             "bio": getattr(data, "bio", None),
+            "collections_visibility": getattr(data, "collections_visibility", None),
             "avatar_url": getattr(data, "avatar_url", None),
             "avatar_key": getattr(data, "avatar_key", None),
             "avatar_source": getattr(data, "avatar_source", None),
@@ -104,6 +106,7 @@ def enrich_user_payload(data: Any) -> dict[str, Any]:
 
     base["display_name"] = resolve_display_name(data)
     base["avatar_source"] = avatar_source
+    base["collections_visibility"] = base.get("collections_visibility") or "public"
     base["avatar_url"] = (
         base["avatar_url"]
         if isinstance(data, dict)
@@ -136,6 +139,7 @@ class UserAuthSummary(BaseModel):
     is_email_verified: bool
     is_2fa_enabled: bool = False
     has_password: bool = True
+    collections_visibility: CollectionsVisibility = "public"
 
     @model_validator(mode="before")
     @classmethod
@@ -179,6 +183,7 @@ class UserMeResponse(BaseModel):
     avatar_source: AvatarSource = "none"
     has_custom_avatar: bool = False
     bio: str | None = None
+    collections_visibility: CollectionsVisibility = "public"
     discord_linked: bool = False
     discord_username: str | None = None
     discord_avatar_url: str | None = None
@@ -200,6 +205,7 @@ class UserUpdateRequest(BaseModel):
     display_name: str | None = Field(default=None, max_length=50)
     bio: str | None = Field(default=None, max_length=240)
     avatar_source: AvatarSource | None = None
+    collections_visibility: CollectionsVisibility | None = None
 
     @field_validator("display_name")
     @classmethod
@@ -308,6 +314,7 @@ class UserPublicResponse(BaseModel):
     avatar_source: AvatarSource = "none"
     discord_linked: bool = False
     discord_username: str | None = None
+    collections_visibility: CollectionsVisibility = "public"
     stats: UserPublicStats = Field(default_factory=UserPublicStats)
     clips_count: int = 0
     total_views: int = 0

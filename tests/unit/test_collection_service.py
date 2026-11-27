@@ -282,3 +282,64 @@ async def test_collection_detail_restricts_clip_technical_metadata_to_clip_owner
     assert all(item.clip.file_size_bytes is None for item in anon_view.clips)
     assert all(item.clip.technical_metadata is None for item in anon_view.clips)
     assert all(item.clip.duration_seconds == 25.0 for item in anon_view.clips)
+
+
+async def test_collection_service_profile_showcase_and_private_collection_guards() -> None:
+    """Verify profile showcase Global Ceiling short-circuiting and 403 on private collections."""
+    session = AsyncMock(spec=AsyncSession)
+    storage = _make_storage_mock()
+    service = CollectionService(session=session, storage_service=storage)
+    owner = _make_user("owner")
+    owner.collections_visibility = "private"
+    other = _make_user("other")
+    now = datetime.now(UTC)
+
+    service._user_repo = AsyncMock()
+    service._collection_repo = AsyncMock()
+
+    # Unknown user returns 404
+    service._user_repo.get_by_username.return_value = None
+    with pytest.raises(AppError) as missing_user:
+        await service.list_user_profile_collections("ghost", current_user=None)
+    assert missing_user.value.status_code == 404
+
+    # Private global ceiling returns empty paginated response safely for non-owners
+    service._user_repo.get_by_username.return_value = owner
+    empty_resp = await service.list_user_profile_collections("owner", current_user=other)
+    assert empty_resp.items == []
+    assert empty_resp.total == 0
+    service._collection_repo.list_profile_collections.assert_not_awaited()
+
+    # Owner still sees their profile showcase even when global visibility is private
+    priv_coll = Collection(
+        id=uuid4(),
+        user_id=owner.id,
+        title="Meus Privados",
+        description="Secreto",
+        privacy="private",
+        show_on_profile=True,
+        accent_color="#2EB886",
+        owner=owner,
+        created_at=now,
+        updated_at=now,
+    )
+    service._collection_repo.list_profile_collections.return_value = ([priv_coll], 1)
+    service._collection_repo.get_collections_preview_metadata.return_value = {
+        priv_coll.id: (2, ["clips/u/c1/thumb.webp", "clips/u/c2/thumb.webp"]),
+    }
+    owner_showcase = await service.list_user_profile_collections("owner", current_user=owner)
+    assert owner_showcase.total == 1
+    item = owner_showcase.items[0]
+    assert item.name == "Meus Privados"
+    assert item.privacy == "private"
+    assert item.effective_privacy == "private"
+    assert item.show_on_profile is True
+    assert item.clips_count == 2
+    assert item.cover_thumbnail_url == "https://cdn.clipai.test/clips/u/c1/thumb.webp"
+
+    # Direct access to private collection blocks non-owner with 403 FORBIDDEN
+    service._collection_repo.get_by_id.return_value = priv_coll
+    with pytest.raises(AppError) as forbid_other:
+        await service.get_collection_detail(priv_coll.id, current_user=other)
+    assert forbid_other.value.status_code == 403
+    assert forbid_other.value.code == "FORBIDDEN"

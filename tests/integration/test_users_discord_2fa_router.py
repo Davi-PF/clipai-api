@@ -108,12 +108,17 @@ class _FakeUserRepo:
         user.password_hash = password_hash
         return user
 
-    async def get_public_stats(self, _user_id: UUID) -> dict[str, int]:
+    async def get_public_stats(
+        self,
+        _user_id: UUID,
+        *,
+        allowed_collection_privacies: tuple[str, ...] = ("public",),
+    ) -> dict[str, int]:
         return {
             "clips_count": 3,
             "total_views": 250,
             "total_likes": 42,
-            "collections_count": 1,
+            "collections_count": 1 if allowed_collection_privacies else 0,
         }
 
 

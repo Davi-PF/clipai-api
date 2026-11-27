@@ -47,6 +47,7 @@ erDiagram
         varchar avatar_key
         varchar avatar_source
         varchar bio
+        varchar collections_visibility
         varchar discord_id UK
         varchar discord_username
         varchar discord_avatar_url
@@ -122,6 +123,7 @@ erDiagram
         varchar title
         text description
         varchar privacy
+        boolean show_on_profile
         varchar accent_color
         timestamptz created_at
         timestamptz updated_at
@@ -185,6 +187,7 @@ Armazena as contas de usuários, perfil customizado (avatar no R2), vínculo com
 | `avatar_key` | `VARCHAR(255)` | Sim | `NULL` | Object key no Cloudflare R2 (`avatars/{user_id}/avatar-{uuid}.{ext}`) |
 | `avatar_source` | `VARCHAR(20)` | Não | `'none'` | `CHECK (avatar_source IN ('custom', 'discord', 'none'))` |
 | `bio` | `VARCHAR(240)` | Sim | `NULL` | Biografia do usuário (máximo de 240 caracteres) |
+| `collections_visibility` | `VARCHAR(20)` | Não | `'public'` | `CHECK (collections_visibility IN ('public', 'friends', 'private'))` — Teto Global de visibilidade de coleções no perfil |
 | `discord_id` | `VARCHAR(64)` | Sim | `NULL` | `UNIQUE` (`ix_users_discord_id`) — Snowflake ID da conta Discord vinculada |
 | `discord_username` | `VARCHAR(100)` | Sim | `NULL` | Username da conta Discord vinculada |
 | `discord_avatar_url` | `VARCHAR(512)` | Sim | `NULL` | URL do avatar no CDN do Discord |
@@ -294,7 +297,8 @@ Coleções (playlists) criadas pelos usuários para organizar clipes.
 | `user_id` | `UUID` | Não | — | `FOREIGN KEY REFERENCES users(id) ON DELETE CASCADE` |
 | `title` | `VARCHAR(100)` | Não | — | Título da coleção |
 | `description` | `TEXT` | Sim | `NULL` | Descrição opcional (máx. 500 caracteres) |
-| `privacy` | `VARCHAR(20)` | Não | `'public'` | `CHECK (privacy IN ('public', 'friends', 'unlisted'))` |
+| `privacy` | `VARCHAR(20)` | Não | `'public'` | `CHECK (privacy IN ('public', 'friends', 'private', 'unlisted'))` (`unlisted` mantido apenas para compatibilidade de dados legados e nunca listado no perfil) |
+| `show_on_profile` | `BOOLEAN` | Não | `false` | Define se a coleção é exibida na vitrine pública do perfil `/u/[username]` (sujeita ao Teto Global `users.collections_visibility`) |
 | `accent_color` | `VARCHAR(7)` | Sim | `NULL` | Cor hexadecimal opcional (`#RRGGBB`) para destaque no leque Bento |
 | `created_at` | `TIMESTAMPTZ` | Não | `now()` | Timestamp de criação |
 | `updated_at` | `TIMESTAMPTZ` | Não | `now()` | Timestamp de atualização |
@@ -450,6 +454,7 @@ CREATE INDEX ix_clip_likes_created_clip ON clip_likes (created_at, clip_id);
 CREATE INDEX ix_clip_favorites_user_created ON clip_favorites (user_id, created_at DESC);
 CREATE INDEX ix_clip_favorites_created_clip ON clip_favorites (created_at, clip_id);
 CREATE INDEX ix_collections_user_privacy ON collections (user_id, privacy, created_at DESC);
+CREATE INDEX ix_collections_user_profile ON collections (user_id, show_on_profile, created_at DESC);
 
 -- 7. Telemetria de Retenção e Visualizações Temporais
 CREATE INDEX ix_clip_views_clip_created ON clip_views (clip_id, created_at DESC);

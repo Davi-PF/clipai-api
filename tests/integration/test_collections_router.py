@@ -43,6 +43,46 @@ class _FakeUserRepo:
     async def get_by_id(self, user_id: UUID) -> User | None:
         return self._store.users.get(user_id)
 
+    async def get_by_username(self, username: str) -> User | None:
+        normalized = username.strip().lower()
+        return next(
+            (u for u in self._store.users.values() if u.username.lower() == normalized),
+            None,
+        )
+
+    async def save(self, user: User) -> User:
+        user.updated_at = datetime.now(UTC)
+        self._store.users[user.id] = user
+        return user
+
+    async def get_public_stats(
+        self,
+        user_id: UUID,
+        *,
+        allowed_collection_privacies: tuple[str, ...] = ("public",),
+    ) -> dict[str, int]:
+        clips = [
+            c
+            for c in self._store.clips.values()
+            if c.user_id == user_id and c.status == "ready" and c.privacy == "public"
+        ]
+        if allowed_collection_privacies:
+            collections_count = sum(
+                1
+                for coll in self._store.collections.values()
+                if coll.user_id == user_id
+                and bool(coll.show_on_profile)
+                and coll.privacy in allowed_collection_privacies
+            )
+        else:
+            collections_count = 0
+        return {
+            "clips_count": len(clips),
+            "total_views": sum(c.views_count for c in clips),
+            "total_likes": sum(c.likes_count for c in clips),
+            "collections_count": collections_count,
+        }
+
 
 class _FakeClipRepo:
     def __init__(self, store: _InMemorySocialStore, _session: AsyncSession) -> None:
@@ -204,6 +244,7 @@ class _FakeCollectionRepo:
         description: str | None,
         privacy: str,
         accent_color: str | None,
+        show_on_profile: bool = False,
     ) -> Collection:
         now = datetime.now(UTC)
         coll = Collection(
@@ -212,6 +253,7 @@ class _FakeCollectionRepo:
             title=title,
             description=description,
             privacy=privacy,
+            show_on_profile=show_on_profile,
             accent_color=accent_color,
             owner=self._store.users[user_id],
             created_at=now,
@@ -241,17 +283,45 @@ class _FakeCollectionRepo:
         if mine and current_user_id is not None:
             items = [c for c in items if c.user_id == current_user_id]
         elif current_user_id is None:
-            items = [c for c in items if c.privacy == "public"]
+            items = [
+                c
+                for c in items
+                if c.privacy == "public"
+                and (c.owner.collections_visibility or "public") == "public"
+            ]
         else:
             items = [
                 c
                 for c in items
-                if c.privacy in ("public", "friends")
-                or (c.privacy == "unlisted" and c.user_id == current_user_id)
+                if c.user_id == current_user_id
+                or (
+                    c.privacy in ("public", "friends")
+                    and (c.owner.collections_visibility or "public") in ("public", "friends")
+                )
             ]
         if author_username and author_username.strip():
             au = author_username.strip().lower()
             items = [c for c in items if c.owner.username.lower() == au]
+        items.sort(key=lambda c: c.created_at, reverse=True)
+        total = len(items)
+        start = (page - 1) * page_size
+        return items[start : start + page_size], total
+
+    async def list_profile_collections(
+        self,
+        *,
+        owner_id: UUID,
+        allowed_privacies: tuple[str, ...],
+        page: int = 1,
+        page_size: int = 20,
+    ) -> tuple[list[Collection], int]:
+        if not allowed_privacies:
+            return [], 0
+        items = [
+            c
+            for c in self._store.collections.values()
+            if c.user_id == owner_id and bool(c.show_on_profile) and c.privacy in allowed_privacies
+        ]
         items.sort(key=lambda c: c.created_at, reverse=True)
         total = len(items)
         start = (page - 1) * page_size
@@ -269,7 +339,7 @@ class _FakeCollectionRepo:
             links = self._visible_links(coll_id, current_user_id)
             thumbs = [
                 lnk.clip.thumbnail_object_key
-                for lnk in sorted(links, key=lambda item: item.added_at, reverse=True)
+                for lnk in sorted(links, key=lambda item: (item.position, item.added_at))
                 if lnk.clip.thumbnail_object_key
             ][:preview_limit]
             result[coll_id] = (len(links), thumbs)
@@ -426,6 +496,12 @@ def social_test_env(
     store.clips[clip_b.id] = clip_b
 
     monkeypatch.setattr("app.core.dependencies.UserRepository", lambda s: _FakeUserRepo(store, s))
+    monkeypatch.setattr(
+        "app.services.user_service.UserRepository", lambda s: _FakeUserRepo(store, s)
+    )
+    monkeypatch.setattr(
+        "app.services.collection_service.UserRepository", lambda s: _FakeUserRepo(store, s)
+    )
     monkeypatch.setattr(
         "app.services.clip_service.ClipRepository", lambda s: _FakeClipRepo(store, s)
     )
@@ -634,9 +710,29 @@ async def test_collections_crud_clip_membership_and_cascade_on_clip_delete(
         assert list_resp.json()["items"][0]["clips_count"] == 2
         assert len(list_resp.json()["items"][0]["preview_thumbnails"]) == 2
 
+        # Default show_on_profile=False hides collection from profile showcase
+        hidden_user_colls = await client.get("/api/v1/users/fallen_br/collections")
+        assert hidden_user_colls.status_code == status.HTTP_200_OK
+        assert hidden_user_colls.json()["total"] == 0
+
+        # Enabling show_on_profile exposes it in /users/{username}/collections with cover URL
+        show_resp = await client.patch(
+            f"/api/v1/collections/{coll_id}",
+            headers=owner_headers,
+            json={"show_on_profile": True},
+        )
+        assert show_resp.status_code == status.HTTP_200_OK
+        assert show_resp.json()["show_on_profile"] is True
+
         user_colls = await client.get("/api/v1/users/fallen_br/collections")
         assert user_colls.status_code == status.HTTP_200_OK
         assert user_colls.json()["total"] == 1
+        assert user_colls.json()["items"][0]["name"] == "Melhores Clutches CS2"
+        assert user_colls.json()["items"][0]["effective_privacy"] == "public"
+        assert (
+            user_colls.json()["items"][0]["cover_thumbnail_url"]
+            == f"https://cdn.clipai.test/{clip_a.thumbnail_object_key}"
+        )
 
         # Filter /api/v1/clips by collection_id
         coll_clips = await client.get("/api/v1/clips", params={"collection_id": coll_id})
@@ -699,3 +795,282 @@ async def test_collections_crud_clip_membership_and_cascade_on_clip_delete(
         del_coll = await client.delete(f"/api/v1/collections/{coll_id}", headers=owner_headers)
         assert del_coll.status_code == status.HTTP_204_NO_CONTENT
         assert (await client.get(f"/api/v1/collections/{coll_id}")).status_code == 404
+
+
+async def test_profile_collections_global_ceiling_toggle_and_direct_access(
+    social_test_env: dict[str, Any],
+) -> None:
+    """Verify two-level Global Ceiling, show_on_profile toggle, /auth/me, /users/me, and detail."""
+    app = social_test_env["app"]
+    store: _InMemorySocialStore = social_test_env["store"]
+    owner: User = social_test_env["owner"]
+    owner_headers = social_test_env["owner_headers"]
+    other_headers = social_test_env["other_headers"]
+    clip_a: Clip = social_test_env["clip_a"]
+
+    # Add a friends-only ready clip and a pending_upload clip to verify visible clip counts/covers
+    now = datetime.now(UTC)
+    friends_clip_id = uuid4()
+    friends_clip = Clip(
+        id=friends_clip_id,
+        slug="clip-friends-1",
+        user_id=owner.id,
+        game_id=clip_a.game_id,
+        title="Clip de Amigos",
+        description=None,
+        status="ready",
+        privacy="friends",
+        video_object_key=f"clips/{owner.id}/{friends_clip_id}/video.mp4",
+        thumbnail_object_key=f"clips/{owner.id}/{friends_clip_id}/thumb.webp",
+        file_size_bytes=2_000_000,
+        duration_seconds=Decimal("15.00"),
+        mime_type="video/mp4",
+        technical_metadata={},
+        views_count=0,
+        likes_count=0,
+        favorites_count=0,
+        author=owner,
+        game=clip_a.game,
+        tags=[],
+        created_at=now,
+        updated_at=now,
+    )
+    pending_clip_id = uuid4()
+    pending_clip = Clip(
+        id=pending_clip_id,
+        slug="clip-pending-1",
+        user_id=owner.id,
+        game_id=clip_a.game_id,
+        title="Clip Pendente",
+        description=None,
+        status="pending_upload",
+        privacy="public",
+        video_object_key=f"clips/{owner.id}/{pending_clip_id}/video.mp4",
+        thumbnail_object_key=f"clips/{owner.id}/{pending_clip_id}/thumb.webp",
+        file_size_bytes=1_000_000,
+        duration_seconds=Decimal("10.00"),
+        mime_type="video/mp4",
+        technical_metadata={},
+        views_count=0,
+        likes_count=0,
+        favorites_count=0,
+        author=owner,
+        game=clip_a.game,
+        tags=[],
+        created_at=now,
+        updated_at=now,
+    )
+    store.clips[friends_clip.id] = friends_clip
+    store.clips[pending_clip.id] = pending_clip
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        # 1. GET /api/v1/auth/me exposes default collections_visibility="public"
+        me_resp = await client.get("/api/v1/auth/me", headers=owner_headers)
+        assert me_resp.status_code == status.HTTP_200_OK
+        assert me_resp.json()["collections_visibility"] == "public"
+
+        # Invalid collections_visibility rejected with 422
+        invalid_vis = await client.patch(
+            "/api/v1/users/me",
+            headers=owner_headers,
+            json={"collections_visibility": "everyone"},
+        )
+        assert invalid_vis.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+
+        # 2. Create 5 collections covering all privacy levels + show_on_profile toggle
+        pub_shown = (
+            await client.post(
+                "/api/v1/collections",
+                headers=owner_headers,
+                json={"name": "Vitrine Publica", "privacy": "public", "show_on_profile": True},
+            )
+        ).json()
+        friends_shown = (
+            await client.post(
+                "/api/v1/collections",
+                headers=owner_headers,
+                json={"name": "Vitrine Amigos", "privacy": "friends", "show_on_profile": True},
+            )
+        ).json()
+        priv_shown = (
+            await client.post(
+                "/api/v1/collections",
+                headers=owner_headers,
+                json={"name": "Vitrine Privada", "privacy": "private", "show_on_profile": True},
+            )
+        ).json()
+        hidden_pub = (
+            await client.post(
+                "/api/v1/collections",
+                headers=owner_headers,
+                json={"name": "Oculta do Perfil", "privacy": "public", "show_on_profile": False},
+            )
+        ).json()
+        unlisted_shown = (
+            await client.post(
+                "/api/v1/collections",
+                headers=owner_headers,
+                json={"name": "Legada Unlisted", "privacy": "unlisted", "show_on_profile": True},
+            )
+        ).json()
+        assert hidden_pub["show_on_profile"] is False
+        assert unlisted_shown["privacy"] == "unlisted"
+
+        # Link clips to pub_shown: pos 0 = friends_clip, pos 1 = clip_a (public), pos 2 = pending
+        await client.post(
+            f"/api/v1/collections/{pub_shown['id']}/clips",
+            headers=owner_headers,
+            json={"clip_id": str(friends_clip.id), "position": 0},
+        )
+        await client.post(
+            f"/api/v1/collections/{pub_shown['id']}/clips",
+            headers=owner_headers,
+            json={"clip_id": str(clip_a.id), "position": 1},
+        )
+        # Simulate a pending clip link in DB to assert ready-only filtering
+        store.collection_clips[(UUID(pub_shown["id"]), pending_clip.id)] = CollectionClip(
+            collection_id=UUID(pub_shown["id"]),
+            clip_id=pending_clip.id,
+            position=2,
+            added_at=now,
+            clip=pending_clip,
+        )
+
+        # 3. Master Switch = "public"
+        # Anonymous sees only pub_shown; clips_count=1 (only public ready clip_a)
+        anon_list = (await client.get("/api/v1/users/fallen_br/collections")).json()
+        assert [item["id"] for item in anon_list["items"]] == [pub_shown["id"]]
+        assert anon_list["items"][0]["clips_count"] == 1
+        assert (
+            anon_list["items"][0]["cover_thumbnail_url"]
+            == f"https://cdn.clipai.test/{clip_a.thumbnail_object_key}"
+        )
+        assert anon_list["items"][0]["effective_privacy"] == "public"
+
+        # Authenticated friend sees pub_shown + friends_shown; clips_count=2 on pub_shown
+        friend_list = (
+            await client.get("/api/v1/users/fallen_br/collections", headers=other_headers)
+        ).json()
+        assert {item["id"] for item in friend_list["items"]} == {
+            pub_shown["id"],
+            friends_shown["id"],
+        }
+        pub_item_for_friend = next(i for i in friend_list["items"] if i["id"] == pub_shown["id"])
+        assert pub_item_for_friend["clips_count"] == 2
+        assert (
+            pub_item_for_friend["cover_thumbnail_url"]
+            == f"https://cdn.clipai.test/{friends_clip.thumbnail_object_key}"
+        )
+
+        # Owner sees pub_shown, friends_shown, and priv_shown (excludes hidden_pub & unlisted)
+        owner_list = (
+            await client.get("/api/v1/users/fallen_br/collections", headers=owner_headers)
+        ).json()
+        assert {item["id"] for item in owner_list["items"]} == {
+            pub_shown["id"],
+            friends_shown["id"],
+            priv_shown["id"],
+        }
+
+        # Public profile metadata reflects viewer-aware collections_count
+        pub_prof_anon = (await client.get("/api/v1/users/fallen_br")).json()
+        pub_prof_friend = (
+            await client.get("/api/v1/users/fallen_br", headers=other_headers)
+        ).json()
+        pub_prof_owner = (await client.get("/api/v1/users/fallen_br", headers=owner_headers)).json()
+        assert pub_prof_anon["collections_visibility"] == "public"
+        assert pub_prof_anon["collections_count"] == 1
+        assert pub_prof_friend["collections_count"] == 2
+        assert pub_prof_owner["collections_count"] == 3
+
+        # 4. Direct access to GET /api/v1/collections/{id}
+        assert (await client.get(f"/api/v1/collections/{priv_shown['id']}")).status_code == 403
+        assert (
+            await client.get(f"/api/v1/collections/{priv_shown['id']}", headers=other_headers)
+        ).status_code == 403
+        assert (
+            await client.get(f"/api/v1/collections/{priv_shown['id']}", headers=owner_headers)
+        ).status_code == 200
+        assert (await client.get(f"/api/v1/collections/{friends_shown['id']}")).status_code == 401
+        assert (
+            await client.get(f"/api/v1/collections/{friends_shown['id']}", headers=other_headers)
+        ).status_code == 200
+
+        # Detail filters out pending_upload clips and hides friends clip from anonymous
+        anon_detail = (await client.get(f"/api/v1/collections/{pub_shown['id']}")).json()
+        assert [c["clip"]["id"] for c in anon_detail["clips"]] == [str(clip_a.id)]
+        friend_detail = (
+            await client.get(f"/api/v1/collections/{pub_shown['id']}", headers=other_headers)
+        ).json()
+        assert [c["clip"]["id"] for c in friend_detail["clips"]] == [
+            str(friends_clip.id),
+            str(clip_a.id),
+        ]
+
+        # 5. Master Switch = "friends" via PATCH /api/v1/users/me
+        patch_friends = await client.patch(
+            "/api/v1/users/me",
+            headers=owner_headers,
+            json={"collections_visibility": "friends"},
+        )
+        assert patch_friends.status_code == status.HTTP_200_OK
+        assert patch_friends.json()["collections_visibility"] == "friends"
+
+        # Anonymous now sees empty showcase & gets 401 on pub_shown direct link
+        assert (await client.get("/api/v1/users/fallen_br/collections")).json()["total"] == 0
+        assert (await client.get("/api/v1/users/fallen_br")).json()["collections_count"] == 0
+        assert (await client.get(f"/api/v1/collections/{pub_shown['id']}")).status_code == 401
+
+        # Authenticated friend sees pub_shown (capped to friends) + friends_shown
+        friend_capped = (
+            await client.get("/api/v1/users/fallen_br/collections", headers=other_headers)
+        ).json()
+        assert {item["id"] for item in friend_capped["items"]} == {
+            pub_shown["id"],
+            friends_shown["id"],
+        }
+        pub_capped_item = next(i for i in friend_capped["items"] if i["id"] == pub_shown["id"])
+        assert pub_capped_item["privacy"] == "public"
+        assert pub_capped_item["effective_privacy"] == "friends"
+
+        # 6. Master Switch = "private" via PATCH /api/v1/users/me
+        patch_private = await client.patch(
+            "/api/v1/users/me",
+            headers=owner_headers,
+            json={"collections_visibility": "private"},
+        )
+        assert patch_private.status_code == status.HTTP_200_OK
+        assert patch_private.json()["collections_visibility"] == "private"
+
+        # Third parties (anon and friend) get empty showcase safely & 403 on direct access
+        assert (await client.get("/api/v1/users/fallen_br/collections")).json()["items"] == []
+        assert (
+            await client.get("/api/v1/users/fallen_br/collections", headers=other_headers)
+        ).json()["items"] == []
+        assert (
+            await client.get(f"/api/v1/collections/{pub_shown['id']}", headers=other_headers)
+        ).status_code == 403
+
+        # Owner still sees all 3 show_on_profile=True collections with effective_privacy="private"
+        owner_private_list = (
+            await client.get("/api/v1/users/fallen_br/collections", headers=owner_headers)
+        ).json()
+        assert owner_private_list["total"] == 3
+        assert all(item["effective_privacy"] == "private" for item in owner_private_list["items"])
+
+        # Toggle show_on_profile off removes collection even from owner's profile showcase
+        toggle_off = await client.patch(
+            f"/api/v1/collections/{priv_shown['id']}",
+            headers=owner_headers,
+            json={"show_on_profile": False},
+        )
+        assert toggle_off.status_code == status.HTTP_200_OK
+        assert toggle_off.json()["show_on_profile"] is False
+        owner_after_toggle = (
+            await client.get("/api/v1/users/fallen_br/collections", headers=owner_headers)
+        ).json()
+        assert owner_after_toggle["total"] == 2
+        assert priv_shown["id"] not in {i["id"] for i in owner_after_toggle["items"]}

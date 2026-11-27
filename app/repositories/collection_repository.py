@@ -37,6 +37,7 @@ class CollectionRepository:
         description: str | None,
         privacy: str,
         accent_color: str | None,
+        show_on_profile: bool = False,
     ) -> Collection:
         """Create a new collection and flush to assign database defaults."""
         collection = Collection(
@@ -44,6 +45,7 @@ class CollectionRepository:
             title=title,
             description=description,
             privacy=privacy,
+            show_on_profile=show_on_profile,
             accent_color=accent_color,
         )
         self._session.add(collection)
@@ -83,6 +85,38 @@ class CollectionRepository:
         items = list((await self._session.execute(items_stmt)).scalars().all())
         return items, total
 
+    async def list_profile_collections(
+        self,
+        *,
+        owner_id: UUID,
+        allowed_privacies: tuple[str, ...],
+        page: int = 1,
+        page_size: int = 20,
+    ) -> tuple[list[Collection], int]:
+        """List paginated profile-visible collections for a user respecting Global Ceiling."""
+        if not allowed_privacies:
+            return [], 0
+
+        filters = (
+            Collection.user_id == owner_id,
+            Collection.show_on_profile.is_(True),
+            Collection.privacy.in_(allowed_privacies),
+        )
+        count_stmt: Select[tuple[int]] = select(func.count(Collection.id)).where(*filters)
+        total = int((await self._session.execute(count_stmt)).scalar_one())
+
+        offset = (page - 1) * page_size
+        items_stmt: Select[tuple[Collection]] = (
+            select(Collection)
+            .options(selectinload(Collection.owner))
+            .where(*filters)
+            .order_by(Collection.created_at.desc())
+            .offset(offset)
+            .limit(page_size)
+        )
+        items = list((await self._session.execute(items_stmt)).scalars().all())
+        return items, total
+
     async def get_collections_preview_metadata(
         self,
         collection_ids: list[UUID],
@@ -106,7 +140,7 @@ class CollectionRepository:
                 Clip.status == "ready",
                 clip_visibility,
             )
-            .order_by(CollectionClip.added_at.desc(), CollectionClip.position.asc())
+            .order_by(CollectionClip.position.asc(), CollectionClip.added_at.asc())
         )
         rows = (await self._session.execute(stmt)).all()
 
@@ -212,11 +246,17 @@ class CollectionRepository:
             filters.append(Collection.user_id == current_user_id)
         elif current_user_id is None:
             filters.append(Collection.privacy == "public")
+            filters.append(Collection.owner.has(User.collections_visibility == "public"))
         else:
             filters.append(
                 or_(
-                    Collection.privacy.in_(["public", "friends"]),
-                    and_(Collection.privacy == "unlisted", Collection.user_id == current_user_id),
+                    Collection.user_id == current_user_id,
+                    and_(
+                        Collection.privacy.in_(["public", "friends"]),
+                        Collection.owner.has(
+                            User.collections_visibility.in_(["public", "friends"])
+                        ),
+                    ),
                 )
             )
 

@@ -118,10 +118,27 @@ async def test_collection_repository_crud_previews_and_membership() -> None:
         user_id=user_id,
         title="Nova",
         description=None,
-        privacy="public",
+        privacy="private",
         accent_color="#E8B04B",
+        show_on_profile=True,
     )
     assert created.accent_color == "#E8B04B"
+    assert created.privacy == "private"
+    assert created.show_on_profile is True
+
+    # Profile showcase listing (empty short-circuit and queried path)
+    assert await repo.list_profile_collections(owner_id=user_id, allowed_privacies=()) == ([], 0)
+    profile_count = MagicMock()
+    profile_count.scalar_one.return_value = 1
+    profile_items = MagicMock()
+    profile_items.scalars.return_value.all.return_value = [coll]
+    session.execute.side_effect = [profile_count, profile_items]
+    prof_list, prof_total = await repo.list_profile_collections(
+        owner_id=user_id,
+        allowed_privacies=("public", "friends"),
+    )
+    assert prof_total == 1
+    assert prof_list == [coll]
 
     # List collections (anon, auth, mine)
     count_res = MagicMock()

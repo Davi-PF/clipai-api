@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.exceptions import AppError
+from app.core.privacy import allowed_profile_collection_privacies
 from app.models.user import User
 from app.repositories.user_repository import UserRepository
 from app.schemas.user import (
@@ -61,6 +62,8 @@ class UserService:
                 current_user,
                 public_base_url=self._settings.r2_public_base_url,
             )
+        if "collections_visibility" in fields_set and payload.collections_visibility is not None:
+            current_user.collections_visibility = payload.collections_visibility
 
         await self._user_repo.save(current_user)
         await self._session.commit()
@@ -142,8 +145,13 @@ class UserService:
 
         return UserMeResponse.model_validate(current_user)
 
-    async def get_public_profile(self, username: str) -> UserPublicResponse:
-        """Return public profile and aggregated public stats for the given username."""
+    async def get_public_profile(
+        self,
+        username: str,
+        *,
+        current_user: User | None = None,
+    ) -> UserPublicResponse:
+        """Return public profile and viewer-aware aggregated stats for the given username."""
         user = await self._user_repo.get_by_username(username)
         if user is None or not user.is_active:
             raise AppError(
@@ -152,7 +160,17 @@ class UserService:
                 message="O perfil de usuário solicitado não foi encontrado.",
             )
 
-        raw_stats = await self._user_repo.get_public_stats(user.id)
+        collections_visibility = user.collections_visibility or "public"
+        is_owner = current_user is not None and current_user.id == user.id
+        allowed_privacies = allowed_profile_collection_privacies(
+            collections_visibility,
+            is_owner=is_owner,
+            is_authenticated=current_user is not None,
+        )
+        raw_stats = await self._user_repo.get_public_stats(
+            user.id,
+            allowed_collection_privacies=allowed_privacies,
+        )
         stats = UserPublicStats(**raw_stats)
         discord_linked = bool(user.discord_id)
         avatar_source = user.avatar_source or "none"
@@ -169,6 +187,7 @@ class UserService:
             avatar_source=avatar_source,  # type: ignore[arg-type]
             discord_linked=discord_linked,
             discord_username=user.discord_username if discord_linked else None,
+            collections_visibility=collections_visibility,  # type: ignore[arg-type]
             stats=stats,
             clips_count=stats.clips_count,
             total_views=stats.total_views,

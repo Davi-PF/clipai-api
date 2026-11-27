@@ -94,8 +94,13 @@ class UserRepository:
         await self._session.flush()
         return user
 
-    async def get_public_stats(self, user_id: UUID) -> dict[str, int]:
-        """Aggregate public ready clips count, views, likes, and public collections count."""
+    async def get_public_stats(
+        self,
+        user_id: UUID,
+        *,
+        allowed_collection_privacies: tuple[str, ...] = ("public",),
+    ) -> dict[str, int]:
+        """Aggregate public ready clips stats and visible profile collections count."""
         clips_stmt = select(
             func.count(Clip.id),
             func.coalesce(func.sum(Clip.views_count), 0),
@@ -107,11 +112,15 @@ class UserRepository:
         )
         clips_row = (await self._session.execute(clips_stmt)).one()
 
-        collections_stmt = select(func.count(Collection.id)).where(
-            Collection.user_id == user_id,
-            Collection.privacy == "public",
-        )
-        collections_count = int((await self._session.execute(collections_stmt)).scalar_one())
+        if allowed_collection_privacies:
+            collections_stmt = select(func.count(Collection.id)).where(
+                Collection.user_id == user_id,
+                Collection.show_on_profile.is_(True),
+                Collection.privacy.in_(allowed_collection_privacies),
+            )
+            collections_count = int((await self._session.execute(collections_stmt)).scalar_one())
+        else:
+            collections_count = 0
 
         return {
             "clips_count": int(clips_row[0] or 0),

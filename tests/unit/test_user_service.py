@@ -85,12 +85,14 @@ async def test_update_profile_display_name_bio_and_avatar_source(
             display_name="   ",
             bio="AWPer bicampeão mundial",
             avatar_source="discord",
+            collections_visibility="friends",
         ),
     )
     assert updated.display_name == "fallen_br"
     assert updated.bio == "AWPer bicampeão mundial"
     assert updated.avatar_source == "discord"
     assert updated.avatar_url == "https://cdn.discordapp.com/avatars/disc_123/a.png"
+    assert updated.collections_visibility == "friends"
     session.commit.assert_awaited()
 
     # Switching to custom when avatar_key is missing raises 400
@@ -200,8 +202,29 @@ async def test_public_profile_and_discord_unlink_guards(test_settings: Settings)
     assert pub.discord_linked is True
     assert pub.discord_username == "fallen_discord"
     assert pub.avatar_url == "https://cdn.discordapp.com/avatars/99887766/hash.png"
+    assert pub.collections_visibility == "public"
     assert pub.stats.clips_count == 7
     assert pub.total_views == 420
+    service._user_repo.get_public_stats.assert_awaited_with(
+        user.id,
+        allowed_collection_privacies=("public",),
+    )
+
+    # Owner viewing own private showcase receives all 3 collection privacy scopes
+    user.collections_visibility = "private"
+    owner_pub = await service.get_public_profile("fallen_br", current_user=user)
+    assert owner_pub.collections_visibility == "private"
+    service._user_repo.get_public_stats.assert_awaited_with(
+        user.id,
+        allowed_collection_privacies=("public", "friends", "private"),
+    )
+
+    # Anonymous viewer on private showcase passes empty allowed_collection_privacies
+    await service.get_public_profile("fallen_br", current_user=None)
+    service._user_repo.get_public_stats.assert_awaited_with(
+        user.id,
+        allowed_collection_privacies=(),
+    )
 
     # Unknown user raises 404
     service._user_repo.get_by_username.return_value = None
