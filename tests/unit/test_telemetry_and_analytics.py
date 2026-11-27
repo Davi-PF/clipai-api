@@ -240,12 +240,20 @@ async def test_telemetry_service_guards_privacy_status_and_caps_watch_time() -> 
         await service.record_telemetry(pending.id, payload, current_user=None)
     assert pending_exc.value.status_code == 404
 
-    # Friends clip blocks anonymous -> 401
+    # Friends clip blocks anonymous -> 401 and non-friend -> 403
     friends_clip = _make_clip(owner, privacy="friends", duration="20.00")
     service._clip_repo.get_by_id.return_value = friends_clip
     with pytest.raises(AppError) as anon_exc:
         await service.record_telemetry(friends_clip.id, payload, current_user=None)
     assert anon_exc.value.status_code == 401
+
+    stranger = _make_user("stranger")
+    no_friend_res = MagicMock()
+    no_friend_res.scalar_one_or_none.return_value = None
+    session.execute.return_value = no_friend_res
+    with pytest.raises(AppError) as stranger_exc:
+        await service.record_telemetry(friends_clip.id, payload, current_user=stranger)
+    assert stranger_exc.value.status_code == 403
 
     # Capped watched_seconds = duration (20s) * 3 = 60.0s
     saved = _make_watch_session(

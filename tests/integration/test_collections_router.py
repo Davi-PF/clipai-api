@@ -37,6 +37,14 @@ class _InMemorySocialStore:
         self.collection_clips: dict[tuple[UUID, UUID], CollectionClip] = {}
         self.friendships: dict[UUID, Friendship] = {}
 
+    def are_friends(self, user_a_id: UUID, user_b_id: UUID) -> bool:
+        if user_a_id == user_b_id:
+            return False
+        return any(
+            f.status == "accepted" and {f.requester_id, f.addressee_id} == {user_a_id, user_b_id}
+            for f in self.friendships.values()
+        )
+
 
 class _FakeFriendshipRepo:
     def __init__(self, store: _InMemorySocialStore, _session: AsyncSession) -> None:
@@ -322,8 +330,13 @@ class _FakeCollectionRepo:
                 for c in items
                 if c.user_id == current_user_id
                 or (
+                    c.privacy == "public"
+                    and (c.owner.collections_visibility or "public") == "public"
+                )
+                or (
                     c.privacy in ("public", "friends")
                     and (c.owner.collections_visibility or "public") in ("public", "friends")
+                    and self._store.are_friends(current_user_id, c.user_id)
                 )
             ]
         if author_username and author_username.strip():
@@ -395,7 +408,13 @@ class _FakeCollectionRepo:
         for (cid, _clip_id), link in self._store.collection_clips.items():
             if cid != collection_id or link.clip.status != "ready":
                 continue
-            if current_user_id is None and link.clip.privacy == "friends":
+            if link.clip.privacy == "friends" and (
+                current_user_id is None
+                or (
+                    current_user_id != link.clip.user_id
+                    and not self._store.are_friends(current_user_id, link.clip.user_id)
+                )
+            ):
                 continue
             result.append(link)
         return result
@@ -528,6 +547,10 @@ def social_test_env(
     )
     monkeypatch.setattr(
         "app.services.user_service.FriendshipRepository",
+        lambda s: _FakeFriendshipRepo(store, s),
+    )
+    monkeypatch.setattr(
+        "app.core.privacy.FriendshipRepository",
         lambda s: _FakeFriendshipRepo(store, s),
     )
     monkeypatch.setattr(
@@ -980,6 +1003,31 @@ async def test_profile_collections_global_ceiling_toggle_and_direct_access(
             == f"https://cdn.clipai.test/{clip_a.thumbnail_object_key}"
         )
         assert anon_list["items"][0]["effective_privacy"] == "public"
+
+        # Logged-in non-friend sees only pub_shown (clips_count=1) and gets 403 on friends_shown
+        non_friend_list = (
+            await client.get("/api/v1/users/fallen_br/collections", headers=other_headers)
+        ).json()
+        assert [item["id"] for item in non_friend_list["items"]] == [pub_shown["id"]]
+        assert non_friend_list["items"][0]["clips_count"] == 1
+        non_friend_direct = await client.get(
+            f"/api/v1/collections/{friends_shown['id']}",
+            headers=other_headers,
+        )
+        assert non_friend_direct.status_code == 403
+        assert "amigos" in non_friend_direct.json()["error"]["message"].lower()
+
+        # Establish accepted friendship between owner and other
+        other_user: User = social_test_env["other"]
+        friendship = Friendship(
+            id=uuid4(),
+            requester_id=owner.id,
+            addressee_id=other_user.id,
+            status="accepted",
+            created_at=now,
+            updated_at=now,
+        )
+        store.friendships[friendship.id] = friendship
 
         # Authenticated friend sees pub_shown + friends_shown; clips_count=2 on pub_shown
         friend_list = (

@@ -1,15 +1,21 @@
-"""Pure visibility precedence and privacy helpers for user collections (Global Ceiling)."""
+"""Visibility precedence, friendship checks, and privacy helpers for clips and collections."""
 
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 from uuid import UUID
 
 from fastapi import status
+from sqlalchemy import and_, exists, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AppError
+from app.models.friendship import Friendship
+from app.repositories.friendship_repository import FriendshipRepository
 
 CollectionsVisibility = Literal["public", "friends", "private"]
 CollectionPrivacy = Literal["public", "friends", "private", "unlisted"]
 EffectiveVisibility = Literal["public", "friends", "private"]
+
+FRIENDS_ONLY_ERROR_MESSAGE = "Este conteúdo é visível apenas para amigos."
 
 _VISIBILITY_RANK: dict[str, int] = {
     "private": 0,
@@ -36,6 +42,39 @@ class _CollectionLike(Protocol):
     user_id: UUID
     privacy: str
     show_on_profile: bool
+
+
+class _ClipLike(Protocol):
+    user_id: UUID
+    privacy: str
+
+
+async def are_friends(
+    session: AsyncSession,
+    user_a_id: UUID,
+    user_b_id: UUID,
+) -> bool:
+    """Return True when user_a_id and user_b_id have an accepted friendship."""
+    return await FriendshipRepository(session).are_friends(user_a_id, user_b_id)
+
+
+def is_accepted_friend_clause(viewer_id: UUID, owner_id_col: Any) -> Any:
+    """Build SQLAlchemy EXISTS clause matching accepted friendships without N+1 queries."""
+    return exists(
+        select(1).where(
+            Friendship.status == "accepted",
+            or_(
+                and_(
+                    Friendship.requester_id == viewer_id,
+                    Friendship.addressee_id == owner_id_col,
+                ),
+                and_(
+                    Friendship.addressee_id == viewer_id,
+                    Friendship.requester_id == owner_id_col,
+                ),
+            ),
+        )
+    )
 
 
 def resolve_effective_visibility(
@@ -75,6 +114,8 @@ def can_view_collection(
     collection: _CollectionLike,
     owner: _UserLike | None,
     viewer: _ViewerLike | None,
+    *,
+    is_friend: bool = False,
 ) -> bool:
     """Return True when the viewer is allowed to open a collection directly by ID."""
     if viewer is not None and viewer.id == collection.user_id:
@@ -87,7 +128,7 @@ def can_view_collection(
     if effective == "public":
         return True
     if effective == "friends":
-        return viewer is not None
+        return viewer is not None and is_friend
     return False
 
 
@@ -95,6 +136,8 @@ def can_view_profile_collection(
     collection: _CollectionLike,
     owner: _UserLike,
     viewer: _ViewerLike | None,
+    *,
+    is_friend: bool = False,
 ) -> bool:
     """Return True when a collection should appear on the owner's public profile showcase."""
     if not bool(getattr(collection, "show_on_profile", False)):
@@ -114,7 +157,7 @@ def can_view_profile_collection(
     if effective == "public":
         return True
     if effective == "friends":
-        return viewer is not None
+        return viewer is not None and is_friend
     return False
 
 
@@ -122,7 +165,7 @@ def allowed_profile_collection_privacies(
     global_visibility: str | None,
     *,
     is_owner: bool,
-    is_authenticated: bool,
+    is_friend: bool = False,
 ) -> tuple[str, ...]:
     """Return SQL-filterable collection.privacy values visible on a user's profile showcase."""
     if is_owner:
@@ -131,7 +174,7 @@ def allowed_profile_collection_privacies(
     normalized_global = (global_visibility or "public").strip().lower()
     if normalized_global == "private":
         return ()
-    if is_authenticated:
+    if is_friend:
         return ("public", "friends") if normalized_global in ("public", "friends") else ()
     return ("public",) if normalized_global == "public" else ()
 
@@ -140,23 +183,56 @@ def ensure_collection_viewable(
     collection: _CollectionLike,
     owner: _UserLike | None,
     viewer: _ViewerLike | None,
+    *,
+    is_friend: bool = False,
 ) -> None:
     """Raise 401/403 AppError when the viewer cannot access the given collection."""
-    if can_view_collection(collection, owner, viewer):
+    if can_view_collection(collection, owner, viewer, is_friend=is_friend):
         return
 
     global_visibility = (
         getattr(owner, "collections_visibility", None) if owner is not None else None
     )
     effective = _resolve_direct_access_visibility(global_visibility, collection.privacy)
-    if effective == "friends" and viewer is None:
+    if effective == "friends":
+        if viewer is None:
+            raise AppError(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                code="INVALID_TOKEN",
+                message="Faça login para visualizar coleções restritas a amigos.",
+            )
         raise AppError(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            code="INVALID_TOKEN",
-            message="Faça login para visualizar coleções restritas a amigos.",
+            status_code=status.HTTP_403_FORBIDDEN,
+            code="FORBIDDEN",
+            message=FRIENDS_ONLY_ERROR_MESSAGE,
         )
     raise AppError(
         status_code=status.HTTP_403_FORBIDDEN,
         code="FORBIDDEN",
         message="Você não tem permissão para acessar esta coleção.",
     )
+
+
+def ensure_clip_viewable(
+    clip: _ClipLike,
+    viewer: _ViewerLike | None,
+    *,
+    is_friend: bool = False,
+) -> None:
+    """Raise 401/403 AppError when the viewer cannot access a friends-only clip."""
+    if clip.privacy != "friends":
+        return
+    if viewer is not None and viewer.id == clip.user_id:
+        return
+    if viewer is None:
+        raise AppError(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            code="INVALID_TOKEN",
+            message="Faça login para visualizar clipes restritos a amigos.",
+        )
+    if not is_friend:
+        raise AppError(
+            status_code=status.HTTP_403_FORBIDDEN,
+            code="FORBIDDEN",
+            message=FRIENDS_ONLY_ERROR_MESSAGE,
+        )

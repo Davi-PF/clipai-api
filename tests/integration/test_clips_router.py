@@ -17,6 +17,7 @@ from app.core.database import get_db
 from app.core.security import create_access_token
 from app.main import create_app
 from app.models.clip import Clip, Tag
+from app.models.friendship import Friendship
 from app.models.game import Game
 from app.models.user import User
 from app.repositories.tag_repository import normalize_tag_slug
@@ -36,6 +37,23 @@ class _InMemoryClipStore:
         self.like_events: list[tuple[UUID, UUID, datetime]] = []
         self.favorite_events: list[tuple[UUID, UUID, datetime]] = []
         self.view_events: list[tuple[UUID, UUID | None, datetime]] = []
+        self.friendships: dict[UUID, Friendship] = {}
+
+    def are_friends(self, user_a_id: UUID, user_b_id: UUID) -> bool:
+        if user_a_id == user_b_id:
+            return False
+        return any(
+            f.status == "accepted" and {f.requester_id, f.addressee_id} == {user_a_id, user_b_id}
+            for f in self.friendships.values()
+        )
+
+
+class _FakeFriendshipRepo:
+    def __init__(self, store: _InMemoryClipStore, _session: AsyncSession) -> None:
+        self._store = store
+
+    async def are_friends(self, user_a_id: UUID, user_b_id: UUID) -> bool:
+        return self._store.are_friends(user_a_id, user_b_id)
 
 
 class _FakeUserRepo:
@@ -300,8 +318,8 @@ class _FakeClipRepo:
         start = (page - 1) * page_size
         return clips[start : start + page_size], total
 
-    @staticmethod
     def _filter_visibility(
+        self,
         clips: list[Clip],
         *,
         mine: bool,
@@ -314,8 +332,9 @@ class _FakeClipRepo:
         return [
             c
             for c in clips
-            if c.privacy in ("public", "friends")
-            or (c.privacy == "unlisted" and c.user_id == current_user_id)
+            if c.privacy == "public"
+            or c.user_id == current_user_id
+            or (c.privacy == "friends" and self._store.are_friends(current_user_id, c.user_id))
         ]
 
     @staticmethod
@@ -410,6 +429,9 @@ def clips_test_env(
     monkeypatch.setattr("app.services.clip_service.TagRepository", lambda s: _FakeTagRepo(store, s))
     monkeypatch.setattr(
         "app.services.clip_service.ClipRepository", lambda s: _FakeClipRepo(store, s)
+    )
+    monkeypatch.setattr(
+        "app.core.privacy.FriendshipRepository", lambda s: _FakeFriendshipRepo(store, s)
     )
 
     storage_mock = MagicMock(spec=StorageService)
@@ -594,9 +616,9 @@ async def test_search_filters_privacy_edit_and_delete(clips_test_env: dict[str, 
         assert anon_list.status_code == status.HTTP_200_OK
         assert [c["privacy"] for c in anon_list.json()["items"]] == ["public"]
 
-        # Other logged user sees public + friends, NOT owner's unlisted
+        # Logged-in non-friend sees only public (NOT owner's friends or unlisted)
         other_list = await client.get("/api/v1/clips", headers=other_headers)
-        assert {c["privacy"] for c in other_list.json()["items"]} == {"public", "friends"}
+        assert {c["privacy"] for c in other_list.json()["items"]} == {"public"}
 
         # Owner sees all 3 with mine=true
         mine_list = await client.get("/api/v1/clips", params={"mine": True}, headers=owner_headers)
@@ -610,11 +632,28 @@ async def test_search_filters_privacy_edit_and_delete(clips_test_env: dict[str, 
         assert filtered.json()["total"] == 1
         assert filtered.json()["items"][0]["slug"] == created["public"]["slug"]
 
-        # Detail privacy: unlisted accessible anonymously, friends blocked anonymously
+        # Detail privacy: unlisted accessible anonymously, friends blocked for anon (401)
+        # and logged-in non-friends (403)
         unlisted_slug = created["unlisted"]["slug"]
         friends_slug = created["friends"]["slug"]
         assert (await client.get(f"/api/v1/clips/{unlisted_slug}")).status_code == 200
         assert (await client.get(f"/api/v1/clips/{friends_slug}")).status_code == 401
+        non_friend_detail = await client.get(f"/api/v1/clips/{friends_slug}", headers=other_headers)
+        assert non_friend_detail.status_code == 403
+        assert "amigos" in non_friend_detail.json()["error"]["message"].lower()
+
+        # Once accepted friendship exists, friend sees friends-only clip in list and detail
+        friendship = Friendship(
+            id=uuid4(),
+            requester_id=clips_test_env["owner"].id,
+            addressee_id=clips_test_env["other"].id,
+            status="accepted",
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+        store.friendships[friendship.id] = friendship
+        friend_list = await client.get("/api/v1/clips", headers=other_headers)
+        assert {c["privacy"] for c in friend_list.json()["items"]} == {"public", "friends"}
         assert (
             await client.get(f"/api/v1/clips/{friends_slug}", headers=other_headers)
         ).status_code == 200

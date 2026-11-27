@@ -232,6 +232,19 @@ async def test_privacy_and_ownership_guards_on_detail_list_update_delete(
         await service.get_clip_detail(friends_clip.slug, None)
     assert anon_friends.value.status_code == 401
 
+    # Logged-in non-friend is blocked with 403
+    no_friend_res = MagicMock()
+    no_friend_res.scalar_one_or_none.return_value = None
+    session.execute.return_value = no_friend_res
+    with pytest.raises(AppError) as non_friend_exc:
+        await service.get_clip_detail(friends_clip.slug, other_user)
+    assert non_friend_exc.value.status_code == 403
+    assert "amigos" in non_friend_exc.value.message.lower()
+
+    # Accepted friend can view the friends-only clip
+    friend_res = MagicMock()
+    friend_res.scalar_one_or_none.return_value = uuid4()
+    session.execute.return_value = friend_res
     detail = await service.get_clip_detail(friends_clip.slug, other_user)
     assert detail.slug == friends_clip.slug
 

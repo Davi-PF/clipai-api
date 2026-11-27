@@ -9,6 +9,7 @@ from sqlalchemy import Select, and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.privacy import is_accepted_friend_clause
 from app.models.clip import Clip, ClipFavorite, ClipLike, ClipTag, ClipView, Tag
 from app.models.collection import CollectionClip
 from app.models.game import Game
@@ -540,8 +541,12 @@ class ClipRepository:
         else:
             filters.append(
                 or_(
-                    Clip.privacy.in_(["public", "friends"]),
-                    and_(Clip.privacy == "unlisted", Clip.user_id == current_user_id),
+                    Clip.privacy == "public",
+                    Clip.user_id == current_user_id,
+                    and_(
+                        Clip.privacy == "friends",
+                        is_accepted_friend_clause(current_user_id, Clip.user_id),
+                    ),
                 )
             )
 

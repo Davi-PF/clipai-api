@@ -224,7 +224,7 @@ class UserService:
         allowed_privacies = allowed_profile_collection_privacies(
             collections_visibility,
             is_owner=is_owner,
-            is_authenticated=current_user is not None,
+            is_friend=(friendship_status == "accepted"),
         )
         raw_stats = await self._user_repo.get_public_stats(
             user.id,

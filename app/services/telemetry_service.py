@@ -6,6 +6,7 @@ from fastapi import status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AppError
+from app.core.privacy import are_friends, ensure_clip_viewable
 from app.models.user import User
 from app.repositories.clip_repository import ClipRepository
 from app.repositories.telemetry_repository import TelemetryRepository
@@ -35,12 +36,13 @@ class TelemetryService:
                 code="RESOURCE_NOT_FOUND",
                 message="O clipe solicitado não foi encontrado.",
             )
-        if clip.privacy == "friends" and current_user is None:
-            raise AppError(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                code="INVALID_TOKEN",
-                message="Faça login para enviar telemetria de clipes restritos a amigos.",
-            )
+        is_owner = current_user is not None and clip.user_id == current_user.id
+        is_friend = (
+            await are_friends(self._session, current_user.id, clip.user_id)
+            if clip.privacy == "friends" and current_user is not None and not is_owner
+            else False
+        )
+        ensure_clip_viewable(clip, current_user, is_friend=is_friend)
 
         max_allowed_watch_seconds = float(clip.duration_seconds) * 3.0
         clamped_watched_seconds = round(

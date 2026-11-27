@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import AppError
 from app.core.privacy import (
     allowed_profile_collection_privacies,
+    are_friends,
     ensure_collection_viewable,
     resolve_effective_visibility,
 )
@@ -105,10 +106,15 @@ class CollectionService:
             )
 
         is_owner = current_user is not None and current_user.id == owner.id
+        is_friend = (
+            await are_friends(self._session, current_user.id, owner.id)
+            if current_user is not None and not is_owner
+            else False
+        )
         allowed_privacies = allowed_profile_collection_privacies(
             owner.collections_visibility,
             is_owner=is_owner,
-            is_authenticated=current_user is not None,
+            is_friend=is_friend,
         )
         if not allowed_privacies:
             return PaginatedResponse.create(items=[], page=page, page_size=page_size, total=0)
@@ -165,7 +171,17 @@ class CollectionService:
         if collection is None:
             raise self._not_found_error()
 
-        ensure_collection_viewable(collection, collection.owner, current_user)
+        is_friend = (
+            await are_friends(self._session, current_user.id, collection.user_id)
+            if current_user is not None and current_user.id != collection.user_id
+            else False
+        )
+        ensure_collection_viewable(
+            collection,
+            collection.owner,
+            current_user,
+            is_friend=is_friend,
+        )
 
         current_user_id = current_user.id if current_user else None
         links, total = await self._collection_repo.list_collection_clips(
