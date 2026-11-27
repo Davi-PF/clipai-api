@@ -5,6 +5,7 @@ from uuid import UUID
 from fastapi import status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.cache import UserScopedTTLCache, analytics_cache
 from app.core.exceptions import AppError
 from app.models.user import User
 from app.repositories.clip_repository import ClipRepository
@@ -15,10 +16,16 @@ from app.schemas.telemetry import ClipTelemetryRequest, ClipTelemetryResponse
 class TelemetryService:
     """Validates clip access and persists idempotent video retention telemetry."""
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        cache: UserScopedTTLCache | None = None,
+    ) -> None:
         self._session = session
         self._clip_repo = ClipRepository(session)
         self._telemetry_repo = TelemetryRepository(session)
+        self._cache = cache or analytics_cache
 
     async def record_telemetry(
         self,
@@ -28,7 +35,7 @@ class TelemetryService:
         current_user: User | None = None,
     ) -> ClipTelemetryResponse:
         """Validate ready clip visibility, cap watch time safely, and upsert watch session."""
-        clip = await self._clip_repo.get_by_id(clip_id)
+        clip = await self._clip_repo.get_by_id(clip_id, load_relations=False)
         if clip is None or clip.status != "ready":
             raise AppError(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -57,6 +64,7 @@ class TelemetryService:
             reached_buckets=payload.reached_buckets,
         )
         await self._session.commit()
+        self._cache.invalidate_user(clip.user_id)
 
         return ClipTelemetryResponse(
             session_id=record.id,

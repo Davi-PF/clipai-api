@@ -1,18 +1,18 @@
 """Business logic service for Creator Studio analytics and clip retention curves."""
 
-from collections import defaultdict
+from collections.abc import Mapping
 from datetime import datetime
 from uuid import UUID
 
 from fastapi import status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.cache import UserScopedTTLCache, analytics_cache
 from app.core.exceptions import AppError
 from app.models.clip import Clip
-from app.models.telemetry import ClipWatchSession
 from app.models.user import User
 from app.repositories.clip_repository import ClipRepository
-from app.repositories.telemetry_repository import TelemetryRepository
+from app.repositories.telemetry_repository import ClipSessionAggregate, TelemetryRepository
 from app.schemas.analytics import (
     AnalyticsOverviewResponse,
     AnalyticsPeriod,
@@ -24,9 +24,11 @@ from app.schemas.analytics import (
 from app.schemas.clip import ClipPrivacy
 from app.schemas.common import PaginatedResponse
 from app.services.analytics_metrics import (
-    build_game_breakdown,
+    build_game_breakdown_from_aggregates,
     build_retention_curve,
     build_views_by_day,
+    build_views_by_day_from_aggregates,
+    compute_metrics_from_aggregates,
     compute_session_metrics,
     find_biggest_drop_bucket,
     resolve_period_window,
@@ -41,11 +43,16 @@ class AnalyticsService:
         self,
         session: AsyncSession,
         storage_service: StorageService,
+        *,
+        cache: UserScopedTTLCache | None = None,
+        cache_ttl_seconds: float | None = None,
     ) -> None:
         self._session = session
         self._storage = storage_service
         self._clip_repo = ClipRepository(session)
         self._telemetry_repo = TelemetryRepository(session)
+        self._cache = cache or analytics_cache
+        self._cache_ttl_seconds = cache_ttl_seconds
 
     async def get_overview(
         self,
@@ -55,32 +62,15 @@ class AnalyticsService:
         now: datetime | None = None,
     ) -> AnalyticsOverviewResponse:
         """Compute consolidated creator KPIs, daily sessions, game breakdown, and top 5 clips."""
-        since_utc, start_date, end_date = resolve_period_window(period, now=now)
-        clips = await self._clip_repo.list_creator_clips(current_user.id)
-        sessions = await self._telemetry_repo.list_sessions_for_clips(
-            [clip.id for clip in clips],
-            since=since_utc,
-        )
-        sessions_by_clip = self._group_sessions_by_clip(sessions)
-        overall_metrics = compute_session_metrics(sessions)
+        if now is not None:
+            return await self._compute_overview(current_user, period=period, now=now)
 
-        return AnalyticsOverviewResponse(
-            period=period,
-            total_clips=len(clips),
-            total_views=sum(clip.views_count for clip in clips),
-            total_likes=sum(clip.likes_count for clip in clips),
-            total_favorites=sum(clip.favorites_count for clip in clips),
-            total_watch_time_seconds=overall_metrics.total_watch_time_seconds,
-            avg_retention_pct=overall_metrics.avg_retention_pct,
-            completion_rate_pct=overall_metrics.completion_rate_pct,
-            total_sessions=overall_metrics.total_sessions,
-            views_by_day=build_views_by_day(
-                sessions,
-                start_date=start_date,
-                end_date=end_date,
-            ),
-            by_game=build_game_breakdown(clips, sessions_by_clip),
-            top_clips=self._build_top_clips(clips, sessions_by_clip),
+        return await self._cache.get_or_set(
+            current_user.id,
+            "analytics:overview",
+            lambda: self._compute_overview(current_user, period=period, now=None),
+            params={"period": period},
+            ttl_seconds=self._cache_ttl_seconds,
         )
 
     async def list_creator_clips(
@@ -97,31 +87,43 @@ class AnalyticsService:
         now: datetime | None = None,
     ) -> PaginatedResponse[CreatorClipAnalyticsItem]:
         """Return paginated creator clips (all privacies) enriched with period retention metrics."""
-        since_utc, _start_date, _end_date = resolve_period_window(period, now=now)
-        clips = await self._clip_repo.list_creator_clips(
+        if now is not None:
+            return await self._compute_creator_clips(
+                current_user,
+                q=q,
+                privacy=privacy,
+                game_id=game_id,
+                period=period,
+                sort=sort,
+                page=page,
+                page_size=page_size,
+                now=now,
+            )
+
+        return await self._cache.get_or_set(
             current_user.id,
-            q=q,
-            privacy=privacy,
-            game_id=game_id,
-        )
-        sessions = await self._telemetry_repo.list_sessions_for_clips(
-            [clip.id for clip in clips],
-            since=since_utc,
-        )
-        sessions_by_clip = self._group_sessions_by_clip(sessions)
-
-        enriched = [
-            self._to_creator_clip_item(clip, sessions_by_clip.get(clip.id, [])) for clip in clips
-        ]
-        sorted_items = self._sort_creator_clips(enriched, sort=sort)
-
-        total = len(sorted_items)
-        offset = (page - 1) * page_size
-        return PaginatedResponse.create(
-            items=sorted_items[offset : offset + page_size],
-            page=page,
-            page_size=page_size,
-            total=total,
+            "analytics:clips",
+            lambda: self._compute_creator_clips(
+                current_user,
+                q=q,
+                privacy=privacy,
+                game_id=game_id,
+                period=period,
+                sort=sort,
+                page=page,
+                page_size=page_size,
+                now=None,
+            ),
+            params={
+                "q": q,
+                "privacy": privacy,
+                "game_id": game_id,
+                "period": period,
+                "sort": sort,
+                "page": page,
+                "page_size": page_size,
+            },
+            ttl_seconds=self._cache_ttl_seconds,
         )
 
     async def get_clip_retention(
@@ -133,7 +135,112 @@ class AnalyticsService:
         now: datetime | None = None,
     ) -> ClipRetentionResponse:
         """Return 0..100% retention curve, drop-off bucket, and daily series for an owned clip."""
-        clip = await self._clip_repo.get_by_id(clip_id)
+        if now is not None:
+            return await self._compute_clip_retention(
+                clip_id,
+                current_user,
+                period=period,
+                now=now,
+            )
+
+        return await self._cache.get_or_set(
+            current_user.id,
+            "analytics:retention",
+            lambda: self._compute_clip_retention(
+                clip_id,
+                current_user,
+                period=period,
+                now=None,
+            ),
+            params={"clip_id": clip_id, "period": period},
+            ttl_seconds=self._cache_ttl_seconds,
+        )
+
+    async def _compute_overview(
+        self,
+        current_user: User,
+        *,
+        period: AnalyticsPeriod,
+        now: datetime | None,
+    ) -> AnalyticsOverviewResponse:
+        since_utc, start_date, end_date = resolve_period_window(period, now=now)
+        clips = await self._clip_repo.list_creator_clips(current_user.id)
+        clip_ids = [clip.id for clip in clips]
+        stats_by_clip = await self._telemetry_repo.aggregate_stats_by_clip(
+            clip_ids,
+            since=since_utc,
+        )
+        daily_rows = await self._telemetry_repo.aggregate_daily_watch_series(
+            clip_ids,
+            since=since_utc,
+        )
+        overall_metrics = compute_metrics_from_aggregates(stats_by_clip.values())
+
+        return AnalyticsOverviewResponse(
+            period=period,
+            total_clips=len(clips),
+            total_views=sum(clip.views_count for clip in clips),
+            total_likes=sum(clip.likes_count for clip in clips),
+            total_favorites=sum(clip.favorites_count for clip in clips),
+            total_watch_time_seconds=overall_metrics.total_watch_time_seconds,
+            avg_retention_pct=overall_metrics.avg_retention_pct,
+            completion_rate_pct=overall_metrics.completion_rate_pct,
+            total_sessions=overall_metrics.total_sessions,
+            views_by_day=build_views_by_day_from_aggregates(
+                daily_rows,
+                start_date=start_date,
+                end_date=end_date,
+            ),
+            by_game=build_game_breakdown_from_aggregates(clips, stats_by_clip),
+            top_clips=self._build_top_clips(clips, stats_by_clip),
+        )
+
+    async def _compute_creator_clips(
+        self,
+        current_user: User,
+        *,
+        q: str | None,
+        privacy: ClipPrivacy | None,
+        game_id: UUID | None,
+        period: AnalyticsPeriod,
+        sort: CreatorClipSort,
+        page: int,
+        page_size: int,
+        now: datetime | None,
+    ) -> PaginatedResponse[CreatorClipAnalyticsItem]:
+        since_utc, _start_date, _end_date = resolve_period_window(period, now=now)
+        clips = await self._clip_repo.list_creator_clips(
+            current_user.id,
+            q=q,
+            privacy=privacy,
+            game_id=game_id,
+        )
+        stats_by_clip = await self._telemetry_repo.aggregate_stats_by_clip(
+            [clip.id for clip in clips],
+            since=since_utc,
+        )
+
+        enriched = [self._to_creator_clip_item(clip, stats_by_clip.get(clip.id)) for clip in clips]
+        sorted_items = self._sort_creator_clips(enriched, sort=sort)
+
+        total = len(sorted_items)
+        offset = (page - 1) * page_size
+        return PaginatedResponse.create(
+            items=sorted_items[offset : offset + page_size],
+            page=page,
+            page_size=page_size,
+            total=total,
+        )
+
+    async def _compute_clip_retention(
+        self,
+        clip_id: UUID,
+        current_user: User,
+        *,
+        period: AnalyticsPeriod,
+        now: datetime | None,
+    ) -> ClipRetentionResponse:
+        clip = await self._clip_repo.get_by_id(clip_id, load_relations=False)
         if clip is None:
             raise AppError(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -174,24 +281,15 @@ class AnalyticsService:
             curve=curve,
         )
 
-    @staticmethod
-    def _group_sessions_by_clip(
-        sessions: list[ClipWatchSession],
-    ) -> dict[UUID, list[ClipWatchSession]]:
-        grouped: dict[UUID, list[ClipWatchSession]] = defaultdict(list)
-        for item in sessions:
-            grouped[item.clip_id].append(item)
-        return grouped
-
     def _build_top_clips(
         self,
         clips: list[Clip],
-        sessions_by_clip: dict[UUID, list[ClipWatchSession]],
+        stats_by_clip: Mapping[UUID, ClipSessionAggregate],
     ) -> list[TopClipAnalyticsItem]:
         ranked: list[tuple[tuple[int, int, int, datetime], TopClipAnalyticsItem]] = []
         for clip in clips:
-            clip_sessions = sessions_by_clip.get(clip.id, [])
-            metrics = compute_session_metrics(clip_sessions)
+            clip_agg = stats_by_clip.get(clip.id)
+            metrics = compute_metrics_from_aggregates((clip_agg,) if clip_agg is not None else ())
             item = TopClipAnalyticsItem(
                 id=clip.id,
                 slug=clip.slug,
@@ -216,9 +314,9 @@ class AnalyticsService:
     def _to_creator_clip_item(
         self,
         clip: Clip,
-        clip_sessions: list[ClipWatchSession],
+        clip_agg: ClipSessionAggregate | None,
     ) -> CreatorClipAnalyticsItem:
-        metrics = compute_session_metrics(clip_sessions)
+        metrics = compute_metrics_from_aggregates((clip_agg,) if clip_agg is not None else ())
         return CreatorClipAnalyticsItem(
             id=clip.id,
             slug=clip.slug,

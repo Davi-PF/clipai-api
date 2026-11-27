@@ -6,7 +6,7 @@ from uuid import UUID
 
 from sqlalchemy import Select, and_, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import contains_eager, joinedload
 
 from app.models.clip import Clip
 from app.models.collection import Collection, CollectionClip
@@ -20,10 +20,10 @@ class CollectionRepository:
         self._session = session
 
     async def get_by_id(self, collection_id: UUID) -> Collection | None:
-        """Fetch a collection by UUID with owner loaded."""
+        """Fetch a collection by UUID with owner joined in a single query."""
         stmt = (
             select(Collection)
-            .options(selectinload(Collection.owner))
+            .options(joinedload(Collection.owner))
             .where(Collection.id == collection_id)
         )
         result = await self._session.execute(stmt)
@@ -67,7 +67,7 @@ class CollectionRepository:
         page_size: int = 20,
     ) -> tuple[list[Collection], int]:
         """List collections paginated respecting privacy visibility."""
-        stmt: Select[tuple[Collection]] = select(Collection).options(selectinload(Collection.owner))
+        stmt: Select[tuple[Collection]] = select(Collection).options(joinedload(Collection.owner))
         count_stmt: Select[tuple[int]] = select(func.count(Collection.id))
 
         filters = self._build_collection_filters(
@@ -80,6 +80,8 @@ class CollectionRepository:
             count_stmt = count_stmt.where(*filters)
 
         total = int((await self._session.execute(count_stmt)).scalar_one())
+        if total == 0:
+            return [], 0
         offset = (page - 1) * page_size
         items_stmt = stmt.order_by(Collection.created_at.desc()).offset(offset).limit(page_size)
         items = list((await self._session.execute(items_stmt)).scalars().all())
@@ -104,11 +106,13 @@ class CollectionRepository:
         )
         count_stmt: Select[tuple[int]] = select(func.count(Collection.id)).where(*filters)
         total = int((await self._session.execute(count_stmt)).scalar_one())
+        if total == 0:
+            return [], 0
 
         offset = (page - 1) * page_size
         items_stmt: Select[tuple[Collection]] = (
             select(Collection)
-            .options(selectinload(Collection.owner))
+            .options(joinedload(Collection.owner))
             .where(*filters)
             .order_by(Collection.created_at.desc())
             .offset(offset)
@@ -174,12 +178,14 @@ class CollectionRepository:
             )
         )
         total = int((await self._session.execute(count_stmt)).scalar_one())
+        if total == 0:
+            return [], 0
 
         offset = (page - 1) * page_size
         items_stmt = (
             select(CollectionClip)
             .join(Clip, Clip.id == CollectionClip.clip_id)
-            .options(selectinload(CollectionClip.clip))
+            .options(contains_eager(CollectionClip.clip))
             .where(
                 CollectionClip.collection_id == collection_id,
                 Clip.status == "ready",

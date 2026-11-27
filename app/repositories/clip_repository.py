@@ -5,9 +5,9 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Select, and_, delete, func, or_, select, update
+from sqlalchemy import Select, and_, delete, func, literal, or_, select, union_all, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import joinedload, selectinload
 
 from app.models.clip import Clip, ClipFavorite, ClipLike, ClipTag, ClipView, Tag
 from app.models.collection import CollectionClip
@@ -26,14 +26,16 @@ class ClipRepository:
     @staticmethod
     def _base_load_options() -> tuple[Any, ...]:
         return (
-            selectinload(Clip.author),
-            selectinload(Clip.game),
+            joinedload(Clip.author),
+            joinedload(Clip.game),
             selectinload(Clip.tags),
         )
 
-    async def get_by_id(self, clip_id: UUID) -> Clip | None:
-        """Fetch a clip by UUID with author, game, and tags loaded."""
-        stmt = select(Clip).options(*self._base_load_options()).where(Clip.id == clip_id)
+    async def get_by_id(self, clip_id: UUID, *, load_relations: bool = True) -> Clip | None:
+        """Fetch a clip by UUID, optionally eager-loading author, game, and tags."""
+        stmt = select(Clip).where(Clip.id == clip_id)
+        if load_relations:
+            stmt = stmt.options(*self._base_load_options())
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
@@ -245,6 +247,38 @@ class ClipRepository:
         )
         result = await self._session.execute(stmt)
         return set(result.scalars().all())
+
+    async def get_user_interaction_clip_ids(
+        self,
+        user_id: UUID,
+        clip_ids: list[UUID],
+    ) -> tuple[set[UUID], set[UUID]]:
+        """Batch-fetch liked and favorited clip IDs in a single UNION ALL SQL query."""
+        if not clip_ids:
+            return set(), set()
+        likes_stmt = select(
+            ClipLike.clip_id.label("clip_id"),
+            literal("like").label("kind"),
+        ).where(
+            ClipLike.user_id == user_id,
+            ClipLike.clip_id.in_(clip_ids),
+        )
+        favs_stmt = select(
+            ClipFavorite.clip_id.label("clip_id"),
+            literal("favorite").label("kind"),
+        ).where(
+            ClipFavorite.user_id == user_id,
+            ClipFavorite.clip_id.in_(clip_ids),
+        )
+        rows = (await self._session.execute(union_all(likes_stmt, favs_stmt))).all()
+        liked_ids: set[UUID] = set()
+        favorited_ids: set[UUID] = set()
+        for clip_id, kind in rows:
+            if kind == "like":
+                liked_ids.add(clip_id)
+            else:
+                favorited_ids.add(clip_id)
+        return liked_ids, favorited_ids
 
     async def list_clips(
         self,
@@ -478,7 +512,7 @@ class ClipRepository:
         """Fetch all ready clips owned by a creator with game eager-loaded (no N+1)."""
         stmt = (
             select(Clip)
-            .options(selectinload(Clip.game))
+            .options(joinedload(Clip.game))
             .where(Clip.user_id == user_id, Clip.status == "ready")
         )
         if q and q.strip():

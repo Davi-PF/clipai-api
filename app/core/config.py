@@ -76,6 +76,9 @@ class Settings(BaseSettings):
     max_thumbnail_size_bytes: int = Field(default=5_242_880, ge=1)
     max_avatar_size_bytes: int = Field(default=5_242_880, ge=1)
 
+    # Analytics In-Memory Cache
+    analytics_cache_ttl_seconds: int = Field(default=30, ge=0, le=3600)
+
     # Resend (Transactional Email)
     resend_api_key: SecretStr | None = None
     email_from_address: str = "CLIPAÍ <onboarding@resend.dev>"
