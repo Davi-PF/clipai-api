@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.exceptions import AppError
+from app.core.privacy import ensure_collection_viewable
 from app.models.clip import Clip
 from app.models.user import User
 from app.repositories.clip_repository import ClipRepository
@@ -559,12 +560,7 @@ class ClipService:
                 code="RESOURCE_NOT_FOUND",
                 message="A coleção solicitada não foi encontrada.",
             )
-        if collection.privacy == "friends" and current_user is None:
-            raise AppError(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                code="INVALID_TOKEN",
-                message="Faça login para visualizar coleções restritas a amigos.",
-            )
+        ensure_collection_viewable(collection, collection.owner, current_user)
 
     async def _load_user_interaction_sets(
         self,

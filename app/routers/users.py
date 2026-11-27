@@ -181,7 +181,7 @@ async def list_user_clips(
 @router.get(
     "/{username}/collections",
     response_model=PaginatedResponse[CollectionSummaryResponse],
-    summary="Lista paginada das coleções de um usuário",
+    summary="Lista paginada das coleções exibidas no perfil público de um usuário",
 )
 async def list_user_collections(
     username: str,
@@ -190,9 +190,9 @@ async def list_user_collections(
     current_user: User | None = Depends(get_optional_user),
     collection_service: CollectionService = Depends(get_collection_service),
 ) -> PaginatedResponse[CollectionSummaryResponse]:
-    """List collections owned by the specified username respecting privacy."""
-    return await collection_service.list_collections(
-        author=username,
+    """List profile showcase collections owned by the specified username under Global Ceiling."""
+    return await collection_service.list_user_profile_collections(
+        username,
         page=page,
         page_size=page_size,
         current_user=current_user,

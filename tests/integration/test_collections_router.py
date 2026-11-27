@@ -43,6 +43,46 @@ class _FakeUserRepo:
     async def get_by_id(self, user_id: UUID) -> User | None:
         return self._store.users.get(user_id)
 
+    async def get_by_username(self, username: str) -> User | None:
+        normalized = username.strip().lower()
+        return next(
+            (u for u in self._store.users.values() if u.username.lower() == normalized),
+            None,
+        )
+
+    async def save(self, user: User) -> User:
+        user.updated_at = datetime.now(UTC)
+        self._store.users[user.id] = user
+        return user
+
+    async def get_public_stats(
+        self,
+        user_id: UUID,
+        *,
+        allowed_collection_privacies: tuple[str, ...] = ("public",),
+    ) -> dict[str, int]:
+        clips = [
+            c
+            for c in self._store.clips.values()
+            if c.user_id == user_id and c.status == "ready" and c.privacy == "public"
+        ]
+        if allowed_collection_privacies:
+            collections_count = sum(
+                1
+                for coll in self._store.collections.values()
+                if coll.user_id == user_id
+                and bool(coll.show_on_profile)
+                and coll.privacy in allowed_collection_privacies
+            )
+        else:
+            collections_count = 0
+        return {
+            "clips_count": len(clips),
+            "total_views": sum(c.views_count for c in clips),
+            "total_likes": sum(c.likes_count for c in clips),
+            "collections_count": collections_count,
+        }
+
 
 class _FakeClipRepo:
     def __init__(self, store: _InMemorySocialStore, _session: AsyncSession) -> None:
@@ -204,6 +244,7 @@ class _FakeCollectionRepo:
         description: str | None,
         privacy: str,
         accent_color: str | None,
+        show_on_profile: bool = False,
     ) -> Collection:
         now = datetime.now(UTC)
         coll = Collection(
@@ -212,6 +253,7 @@ class _FakeCollectionRepo:
             title=title,
             description=description,
             privacy=privacy,
+            show_on_profile=show_on_profile,
             accent_color=accent_color,
             owner=self._store.users[user_id],
             created_at=now,
@@ -241,17 +283,45 @@ class _FakeCollectionRepo:
         if mine and current_user_id is not None:
             items = [c for c in items if c.user_id == current_user_id]
         elif current_user_id is None:
-            items = [c for c in items if c.privacy == "public"]
+            items = [
+                c
+                for c in items
+                if c.privacy == "public"
+                and (c.owner.collections_visibility or "public") == "public"
+            ]
         else:
             items = [
                 c
                 for c in items
-                if c.privacy in ("public", "friends")
-                or (c.privacy == "unlisted" and c.user_id == current_user_id)
+                if c.user_id == current_user_id
+                or (
+                    c.privacy in ("public", "friends")
+                    and (c.owner.collections_visibility or "public") in ("public", "friends")
+                )
             ]
         if author_username and author_username.strip():
             au = author_username.strip().lower()
             items = [c for c in items if c.owner.username.lower() == au]
+        items.sort(key=lambda c: c.created_at, reverse=True)
+        total = len(items)
+        start = (page - 1) * page_size
+        return items[start : start + page_size], total
+
+    async def list_profile_collections(
+        self,
+        *,
+        owner_id: UUID,
+        allowed_privacies: tuple[str, ...],
+        page: int = 1,
+        page_size: int = 20,
+    ) -> tuple[list[Collection], int]:
+        if not allowed_privacies:
+            return [], 0
+        items = [
+            c
+            for c in self._store.collections.values()
+            if c.user_id == owner_id and bool(c.show_on_profile) and c.privacy in allowed_privacies
+        ]
         items.sort(key=lambda c: c.created_at, reverse=True)
         total = len(items)
         start = (page - 1) * page_size
@@ -269,7 +339,7 @@ class _FakeCollectionRepo:
             links = self._visible_links(coll_id, current_user_id)
             thumbs = [
                 lnk.clip.thumbnail_object_key
-                for lnk in sorted(links, key=lambda item: item.added_at, reverse=True)
+                for lnk in sorted(links, key=lambda item: (item.position, item.added_at))
                 if lnk.clip.thumbnail_object_key
             ][:preview_limit]
             result[coll_id] = (len(links), thumbs)
@@ -426,6 +496,12 @@ def social_test_env(
     store.clips[clip_b.id] = clip_b
 
     monkeypatch.setattr("app.core.dependencies.UserRepository", lambda s: _FakeUserRepo(store, s))
+    monkeypatch.setattr(
+        "app.services.user_service.UserRepository", lambda s: _FakeUserRepo(store, s)
+    )
+    monkeypatch.setattr(
+        "app.services.collection_service.UserRepository", lambda s: _FakeUserRepo(store, s)
+    )
     monkeypatch.setattr(
         "app.services.clip_service.ClipRepository", lambda s: _FakeClipRepo(store, s)
     )
@@ -634,9 +710,29 @@ async def test_collections_crud_clip_membership_and_cascade_on_clip_delete(
         assert list_resp.json()["items"][0]["clips_count"] == 2
         assert len(list_resp.json()["items"][0]["preview_thumbnails"]) == 2
 
+        # Default show_on_profile=False hides collection from profile showcase
+        hidden_user_colls = await client.get("/api/v1/users/fallen_br/collections")
+        assert hidden_user_colls.status_code == status.HTTP_200_OK
+        assert hidden_user_colls.json()["total"] == 0
+
+        # Enabling show_on_profile exposes it in /users/{username}/collections with cover URL
+        show_resp = await client.patch(
+            f"/api/v1/collections/{coll_id}",
+            headers=owner_headers,
+            json={"show_on_profile": True},
+        )
+        assert show_resp.status_code == status.HTTP_200_OK
+        assert show_resp.json()["show_on_profile"] is True
+
         user_colls = await client.get("/api/v1/users/fallen_br/collections")
         assert user_colls.status_code == status.HTTP_200_OK
         assert user_colls.json()["total"] == 1
+        assert user_colls.json()["items"][0]["name"] == "Melhores Clutches CS2"
+        assert user_colls.json()["items"][0]["effective_privacy"] == "public"
+        assert (
+            user_colls.json()["items"][0]["cover_thumbnail_url"]
+            == f"https://cdn.clipai.test/{clip_a.thumbnail_object_key}"
+        )
 
         # Filter /api/v1/clips by collection_id
         coll_clips = await client.get("/api/v1/clips", params={"collection_id": coll_id})

@@ -7,10 +7,16 @@ from fastapi import status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AppError
+from app.core.privacy import (
+    allowed_profile_collection_privacies,
+    ensure_collection_viewable,
+    resolve_effective_visibility,
+)
 from app.models.collection import Collection, CollectionClip
 from app.models.user import User
 from app.repositories.clip_repository import ClipRepository
 from app.repositories.collection_repository import CollectionRepository
+from app.repositories.user_repository import UserRepository
 from app.schemas.clip import resolve_owner_clip_metadata
 from app.schemas.collection import (
     CollectionAddClipRequest,
@@ -39,6 +45,7 @@ class CollectionService:
         self._storage = storage_service
         self._collection_repo = CollectionRepository(session)
         self._clip_repo = ClipRepository(session)
+        self._user_repo = UserRepository(session)
 
     async def list_collections(
         self,
@@ -80,6 +87,53 @@ class CollectionService:
         ]
         return PaginatedResponse.create(items=items, page=page, page_size=page_size, total=total)
 
+    async def list_user_profile_collections(
+        self,
+        username: str,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        current_user: User | None = None,
+    ) -> PaginatedResponse[CollectionSummaryResponse]:
+        """List profile showcase collections for a user applying the Global Ceiling rule."""
+        owner = await self._user_repo.get_by_username(username)
+        if owner is None or not owner.is_active:
+            raise AppError(
+                status_code=status.HTTP_404_NOT_FOUND,
+                code="RESOURCE_NOT_FOUND",
+                message="O perfil de usuário solicitado não foi encontrado.",
+            )
+
+        is_owner = current_user is not None and current_user.id == owner.id
+        allowed_privacies = allowed_profile_collection_privacies(
+            owner.collections_visibility,
+            is_owner=is_owner,
+            is_authenticated=current_user is not None,
+        )
+        if not allowed_privacies:
+            return PaginatedResponse.create(items=[], page=page, page_size=page_size, total=0)
+
+        collections, total = await self._collection_repo.list_profile_collections(
+            owner_id=owner.id,
+            allowed_privacies=allowed_privacies,
+            page=page,
+            page_size=page_size,
+        )
+        current_user_id = current_user.id if current_user else None
+        metadata = await self._collection_repo.get_collections_preview_metadata(
+            [coll.id for coll in collections],
+            current_user_id=current_user_id,
+        )
+        items = [
+            self._to_summary_response(
+                coll,
+                clips_count=metadata.get(coll.id, (0, []))[0],
+                preview_keys=metadata.get(coll.id, (0, []))[1],
+            )
+            for coll in collections
+        ]
+        return PaginatedResponse.create(items=items, page=page, page_size=page_size, total=total)
+
     async def create_collection(
         self,
         payload: CollectionCreateRequest,
@@ -92,6 +146,7 @@ class CollectionService:
             description=payload.description,
             privacy=payload.privacy,
             accent_color=payload.accent_color,
+            show_on_profile=payload.show_on_profile,
         )
         await self._session.commit()
         loaded = await self._collection_repo.get_by_id(collection.id)
@@ -110,12 +165,7 @@ class CollectionService:
         if collection is None:
             raise self._not_found_error()
 
-        if collection.privacy == "friends" and current_user is None:
-            raise AppError(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                code="INVALID_TOKEN",
-                message="Faça login para visualizar coleções restritas a amigos.",
-            )
+        ensure_collection_viewable(collection, collection.owner, current_user)
 
         current_user_id = current_user.id if current_user else None
         links, total = await self._collection_repo.list_collection_clips(
@@ -147,12 +197,18 @@ class CollectionService:
             for link in links
         ]
 
+        owner_visibility = (
+            collection.owner.collections_visibility if collection.owner is not None else "public"
+        )
         total_pages = ceil(total / page_size) if total > 0 else 0
         return CollectionDetailResponse(
             id=collection.id,
             title=collection.title,
+            name=collection.title,
             description=collection.description,
             privacy=collection.privacy,  # type: ignore[arg-type]
+            effective_privacy=resolve_effective_visibility(owner_visibility, collection.privacy),
+            show_on_profile=bool(collection.show_on_profile),
             accent_color=collection.accent_color,
             clips_count=total,
             owner=CollectionOwnerSummary.model_validate(collection.owner),
@@ -180,6 +236,8 @@ class CollectionService:
             collection.description = payload.description.strip() if payload.description else None
         if "privacy" in fields_set and payload.privacy is not None:
             collection.privacy = payload.privacy
+        if "show_on_profile" in fields_set and payload.show_on_profile is not None:
+            collection.show_on_profile = payload.show_on_profile
         if "accent_color" in fields_set:
             collection.accent_color = payload.accent_color
 
@@ -327,14 +385,22 @@ class CollectionService:
         clips_count: int,
         preview_keys: list[str],
     ) -> CollectionSummaryResponse:
+        owner_visibility = (
+            collection.owner.collections_visibility if collection.owner is not None else "public"
+        )
+        preview_urls = [self._storage.build_public_url(key) for key in preview_keys]
         return CollectionSummaryResponse(
             id=collection.id,
             title=collection.title,
+            name=collection.title,
             description=collection.description,
             privacy=collection.privacy,  # type: ignore[arg-type]
+            effective_privacy=resolve_effective_visibility(owner_visibility, collection.privacy),
+            show_on_profile=bool(collection.show_on_profile),
             accent_color=collection.accent_color,
             clips_count=clips_count,
-            preview_thumbnails=[self._storage.build_public_url(key) for key in preview_keys],
+            cover_thumbnail_url=preview_urls[0] if preview_urls else None,
+            preview_thumbnails=preview_urls,
             owner=CollectionOwnerSummary.model_validate(collection.owner),
             created_at=collection.created_at,
             updated_at=collection.updated_at,

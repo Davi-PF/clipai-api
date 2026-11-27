@@ -7,7 +7,8 @@ from uuid import UUID
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.schemas.clip import ClipPrivacy, TechnicalMetadataSchema
+from app.core.privacy import CollectionPrivacy, CollectionsVisibility
+from app.schemas.clip import TechnicalMetadataSchema
 from app.schemas.user import enrich_user_payload
 
 _HEX_COLOR_PATTERN = re.compile(r"^#[0-9A-Fa-f]{6}$")
@@ -35,7 +36,8 @@ class CollectionCreateRequest(BaseModel):
         validation_alias=AliasChoices("title", "name"),
     )
     description: str | None = Field(default=None, max_length=500)
-    privacy: ClipPrivacy = "public"
+    privacy: CollectionPrivacy = "public"
+    show_on_profile: bool = False
     accent_color: str | None = Field(default=None, max_length=7)
 
     @field_validator("title")
@@ -74,7 +76,8 @@ class CollectionUpdateRequest(BaseModel):
         validation_alias=AliasChoices("title", "name"),
     )
     description: str | None = Field(default=None, max_length=500)
-    privacy: ClipPrivacy | None = None
+    privacy: CollectionPrivacy | None = None
+    show_on_profile: bool | None = None
     accent_color: str | None = Field(default=None, max_length=7)
 
     @field_validator("title")
@@ -121,10 +124,14 @@ class CollectionSummaryResponse(BaseModel):
 
     id: UUID
     title: str
+    name: str
     description: str | None
-    privacy: ClipPrivacy
+    privacy: CollectionPrivacy
+    effective_privacy: CollectionsVisibility
+    show_on_profile: bool = False
     accent_color: str | None
     clips_count: int
+    cover_thumbnail_url: str | None = None
     preview_thumbnails: list[str]
     owner: CollectionOwnerSummary
     created_at: datetime
@@ -169,8 +176,11 @@ class CollectionDetailResponse(BaseModel):
 
     id: UUID
     title: str
+    name: str
     description: str | None
-    privacy: ClipPrivacy
+    privacy: CollectionPrivacy
+    effective_privacy: CollectionsVisibility
+    show_on_profile: bool = False
     accent_color: str | None
     clips_count: int
     owner: CollectionOwnerSummary
