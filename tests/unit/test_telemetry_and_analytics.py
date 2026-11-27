@@ -1,26 +1,35 @@
 """Unit tests for video telemetry schemas, repository, service, and analytics math helpers."""
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.cache import UserScopedTTLCache
 from app.core.exceptions import AppError
 from app.models.clip import Clip
 from app.models.game import Game
 from app.models.telemetry import ClipWatchSession
 from app.models.user import User
 from app.repositories.clip_repository import ClipRepository
-from app.repositories.telemetry_repository import TelemetryRepository
+from app.repositories.telemetry_repository import (
+    ClipSessionAggregate,
+    DailyWatchAggregate,
+    TelemetryRepository,
+)
 from app.schemas.telemetry import ClipTelemetryRequest
 from app.services.analytics_metrics import (
     build_game_breakdown,
+    build_game_breakdown_from_aggregates,
     build_retention_curve,
     build_views_by_day,
+    build_views_by_day_from_aggregates,
+    compute_metrics_from_aggregates,
     compute_session_metrics,
     find_biggest_drop_bucket,
     resolve_period_window,
@@ -382,3 +391,126 @@ async def test_analytics_service_enforces_clip_ownership() -> None:
         await service.get_clip_retention(clip.id, other)
     assert forbidden.value.status_code == 403
     assert "permissão" in forbidden.value.message.lower()
+
+
+async def test_telemetry_repository_sql_aggregations_and_metric_helpers() -> None:
+    """Verify PostgreSQL GROUP BY aggregate queries and aggregate metric helpers."""
+    session = AsyncMock(spec=AsyncSession)
+    repo = TelemetryRepository(session)
+    clip_id = uuid4()
+    since = datetime(2026, 11, 1, 0, 0, tzinfo=UTC)
+
+    # Empty clip_ids short-circuit with zero DB queries
+    assert await repo.aggregate_stats_by_clip([]) == {}
+    assert await repo.aggregate_daily_watch_series([]) == []
+    session.execute.assert_not_awaited()
+
+    # Per-clip SQL aggregation
+    stats_res = MagicMock()
+    stats_res.all.return_value = [(clip_id, 4, 48.0, 160, 1)]
+    session.execute.return_value = stats_res
+    stats_map = await repo.aggregate_stats_by_clip([clip_id], since=since)
+    assert stats_map[clip_id] == ClipSessionAggregate(
+        clip_id=clip_id,
+        total_sessions=4,
+        total_watch_seconds=48.0,
+        sum_max_progress_pct=160,
+        completed_count=1,
+    )
+    stats_sql = str(session.execute.call_args[0][0].compile(dialect=postgresql.dialect()))
+    assert "GROUP BY clip_watch_sessions.clip_id" in stats_sql
+
+    # Daily UTC SQL aggregation (handles both date and datetime row values)
+    daily_res = MagicMock()
+    daily_res.all.return_value = [
+        (date(2026, 11, 20), 2, 36.0),
+        (datetime(2026, 11, 22, 0, 0, tzinfo=UTC), 2, 12.0),
+    ]
+    session.execute.return_value = daily_res
+    daily_rows = await repo.aggregate_daily_watch_series([clip_id], since=since)
+    assert daily_rows == [
+        DailyWatchAggregate(day=date(2026, 11, 20), sessions=2, total_watch_seconds=36.0),
+        DailyWatchAggregate(day=date(2026, 11, 22), sessions=2, total_watch_seconds=12.0),
+    ]
+    daily_sql = str(session.execute.call_args[0][0].compile(dialect=postgresql.dialect()))
+    assert "GROUP BY" in daily_sql
+    assert "timezone" in daily_sql
+
+    # Aggregate metric helpers match raw session math exactly
+    assert compute_metrics_from_aggregates([]).total_sessions == 0
+    summary = compute_metrics_from_aggregates(stats_map.values())
+    assert summary.total_sessions == 4
+    assert summary.total_watch_time_seconds == 48
+    assert summary.avg_watch_seconds == 12.0
+    assert summary.avg_retention_pct == 40.0
+    assert summary.completion_rate_pct == 25.0
+
+    series = build_views_by_day_from_aggregates(
+        daily_rows,
+        start_date=date(2026, 11, 20),
+        end_date=date(2026, 11, 22),
+    )
+    assert [(pt.date, pt.sessions, pt.watch_time_seconds) for pt in series] == [
+        ("2026-11-20", 2, 36),
+        ("2026-11-21", 0, 0),
+        ("2026-11-22", 2, 12),
+    ]
+
+    owner = _make_user()
+    cs2 = Game(id=uuid4(), name="CS2", slug="cs2")
+    clip_cs2 = _make_clip(owner, game=cs2, views=50)
+    clip_none = _make_clip(owner, game=None, views=10)
+    breakdown = build_game_breakdown_from_aggregates(
+        [clip_cs2, clip_none],
+        {
+            clip_cs2.id: ClipSessionAggregate(
+                clip_id=clip_cs2.id,
+                total_sessions=2,
+                total_watch_seconds=36.0,
+                sum_max_progress_pct=120,
+                completed_count=1,
+            )
+        },
+    )
+    assert [item.game_name for item in breakdown] == ["CS2", "Sem jogo"]
+    assert breakdown[0].avg_retention_pct == 60.0
+    assert breakdown[1].avg_retention_pct == 0.0
+
+
+async def test_analytics_service_uses_cache_and_bypasses_when_explicit_now_passed() -> None:
+    """Cache overview/clips/retention by (user_id, endpoint, params) and bypass on explicit now."""
+    session = AsyncMock(spec=AsyncSession)
+    storage = MagicMock(spec=StorageService)
+    storage.build_public_url.side_effect = lambda key: f"https://cdn.clipai.test/{key}"
+    local_cache = UserScopedTTLCache(default_ttl_seconds=30.0)
+    service = AnalyticsService(session=session, storage_service=storage, cache=local_cache)
+    service._clip_repo = AsyncMock()
+    service._telemetry_repo = AsyncMock()
+
+    owner = _make_user("owner")
+    clip = _make_clip(owner)
+    service._clip_repo.list_creator_clips.return_value = [clip]
+    service._clip_repo.get_by_id.return_value = clip
+    service._telemetry_repo.aggregate_stats_by_clip.return_value = {}
+    service._telemetry_repo.aggregate_daily_watch_series.return_value = []
+    service._telemetry_repo.list_sessions_for_clips.return_value = []
+
+    await service.get_overview(owner, period="30d")
+    await service.get_overview(owner, period="30d")
+    assert service._clip_repo.list_creator_clips.await_count == 1
+
+    await service.list_creator_clips(owner, period="30d", sort="views")
+    await service.list_creator_clips(owner, period="30d", sort="views")
+    assert service._clip_repo.list_creator_clips.await_count == 2
+
+    await service.get_clip_retention(clip.id, owner, period="30d")
+    await service.get_clip_retention(clip.id, owner, period="30d")
+    assert service._clip_repo.get_by_id.await_count == 1
+
+    # Explicit now bypasses cache cleanly for deterministic tests
+    fixed_now = datetime(2026, 11, 22, 12, 0, tzinfo=UTC)
+    await service.get_overview(owner, period="30d", now=fixed_now)
+    await service.list_creator_clips(owner, period="30d", now=fixed_now)
+    await service.get_clip_retention(clip.id, owner, period="30d", now=fixed_now)
+    assert service._clip_repo.list_creator_clips.await_count == 4
+    assert service._clip_repo.get_by_id.await_count == 2

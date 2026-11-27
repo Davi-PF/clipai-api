@@ -1,7 +1,8 @@
 """End-to-end integration tests for Sprint 5: Telemetry Collection and Creator Studio Analytics."""
 
+from collections import defaultdict
 from collections.abc import AsyncGenerator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -20,6 +21,7 @@ from app.models.clip import Clip
 from app.models.game import Game
 from app.models.telemetry import ClipWatchSession
 from app.models.user import User
+from app.repositories.telemetry_repository import ClipSessionAggregate, DailyWatchAggregate
 from app.routers.clips import get_storage_service
 from app.services.storage_service import StorageService
 
@@ -31,6 +33,7 @@ class _AnalyticsStore:
         self.users: dict[UUID, User] = {}
         self.clips: dict[UUID, Clip] = {}
         self.sessions: dict[tuple[UUID, str], ClipWatchSession] = {}
+        self.query_counts: dict[str, int] = defaultdict(int)
 
 
 class _FakeUserRepo:
@@ -45,8 +48,21 @@ class _FakeClipRepo:
     def __init__(self, store: _AnalyticsStore, _session: AsyncSession) -> None:
         self._store = store
 
-    async def get_by_id(self, clip_id: UUID) -> Clip | None:
+    async def get_by_id(
+        self,
+        clip_id: UUID,
+        *,
+        load_relations: bool = True,
+    ) -> Clip | None:
+        _ = load_relations
+        self._store.query_counts["clip_get_by_id"] += 1
         return self._store.clips.get(clip_id)
+
+    async def like_clip(self, *, user_id: UUID, clip_id: UUID) -> int:
+        _ = user_id
+        clip = self._store.clips[clip_id]
+        clip.likes_count += 1
+        return clip.likes_count
 
     async def list_creator_clips(
         self,
@@ -56,6 +72,7 @@ class _FakeClipRepo:
         privacy: str | None = None,
         game_id: UUID | None = None,
     ) -> list[Clip]:
+        self._store.query_counts["list_creator_clips"] += 1
         clips = [
             c for c in self._store.clips.values() if c.user_id == user_id and c.status == "ready"
         ]
@@ -120,6 +137,7 @@ class _FakeTelemetryRepo:
         *,
         since: datetime | None = None,
     ) -> list[ClipWatchSession]:
+        self._store.query_counts["list_sessions_for_clips"] += 1
         id_set = set(clip_ids)
         results: list[ClipWatchSession] = []
         for item in self._store.sessions.values():
@@ -129,6 +147,48 @@ class _FakeTelemetryRepo:
                 continue
             results.append(item)
         return results
+
+    async def aggregate_stats_by_clip(
+        self,
+        clip_ids: list[UUID],
+        *,
+        since: datetime | None = None,
+    ) -> dict[UUID, ClipSessionAggregate]:
+        self._store.query_counts["aggregate_stats_by_clip"] += 1
+        sessions = await self.list_sessions_for_clips(clip_ids, since=since)
+        grouped: dict[UUID, list[ClipWatchSession]] = defaultdict(list)
+        for item in sessions:
+            grouped[item.clip_id].append(item)
+        return {
+            cid: ClipSessionAggregate(
+                clip_id=cid,
+                total_sessions=len(items),
+                total_watch_seconds=sum(float(s.watched_seconds) for s in items),
+                sum_max_progress_pct=sum(int(s.max_progress_pct) for s in items),
+                completed_count=sum(1 for s in items if s.completed),
+            )
+            for cid, items in grouped.items()
+        }
+
+    async def aggregate_daily_watch_series(
+        self,
+        clip_ids: list[UUID],
+        *,
+        since: datetime | None = None,
+    ) -> list[DailyWatchAggregate]:
+        self._store.query_counts["aggregate_daily_watch_series"] += 1
+        sessions = await self.list_sessions_for_clips(clip_ids, since=since)
+        by_day: dict[date, list[ClipWatchSession]] = defaultdict(list)
+        for item in sessions:
+            by_day[item.created_at.astimezone(UTC).date()].append(item)
+        return [
+            DailyWatchAggregate(
+                day=day_key,
+                sessions=len(items),
+                total_watch_seconds=sum(float(s.watched_seconds) for s in items),
+            )
+            for day_key, items in sorted(by_day.items())
+        ]
 
 
 @pytest.fixture
@@ -269,6 +329,9 @@ def analytics_test_env(
     )
     monkeypatch.setattr(
         "app.services.analytics_service.ClipRepository", lambda s: _FakeClipRepo(store, s)
+    )
+    monkeypatch.setattr(
+        "app.services.clip_service.ClipRepository", lambda s: _FakeClipRepo(store, s)
     )
     monkeypatch.setattr(
         "app.services.analytics_service.TelemetryRepository",
@@ -552,3 +615,101 @@ async def test_creator_analytics_overview_clips_filters_sorting_and_retention(
             headers=other_headers,
         )
         assert forbid_other.status_code == status.HTTP_403_FORBIDDEN
+
+
+async def test_analytics_cache_hits_and_invalidates_on_clip_and_telemetry_mutations(
+    analytics_test_env: dict[str, Any],
+) -> None:
+    """Verify repeated analytics calls hit TTL cache and mutations invalidate per user."""
+    app = analytics_test_env["app"]
+    store: _AnalyticsStore = analytics_test_env["store"]
+    creator_headers = analytics_test_env["creator_headers"]
+    other_headers = analytics_test_env["other_headers"]
+    clip_public: Clip = analytics_test_env["clip_public"]
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        # First call computes from repository
+        first = await client.get(
+            "/api/v1/analytics/overview",
+            params={"period": "30d"},
+            headers=creator_headers,
+        )
+        assert first.status_code == status.HTTP_200_OK
+        assert store.query_counts["list_creator_clips"] == 1
+        assert store.query_counts["aggregate_stats_by_clip"] == 1
+        assert store.query_counts["aggregate_daily_watch_series"] == 1
+
+        # Second identical call hits in-memory cache -> zero extra DB queries
+        second = await client.get(
+            "/api/v1/analytics/overview",
+            params={"period": "30d"},
+            headers=creator_headers,
+        )
+        assert second.status_code == status.HTTP_200_OK
+        assert second.json() == first.json()
+        assert store.query_counts["list_creator_clips"] == 1
+
+        # Different query param misses cache independently
+        period_7d = await client.get(
+            "/api/v1/analytics/overview",
+            params={"period": "7d"},
+            headers=creator_headers,
+        )
+        assert period_7d.status_code == status.HTTP_200_OK
+        assert store.query_counts["list_creator_clips"] == 2
+
+        # Another user's like on creator's clip invalidates creator's analytics cache
+        like_resp = await client.post(
+            f"/api/v1/clips/{clip_public.id}/like",
+            headers=other_headers,
+        )
+        assert like_resp.status_code == status.HTTP_200_OK
+
+        refreshed_after_like = await client.get(
+            "/api/v1/analytics/overview",
+            params={"period": "30d"},
+            headers=creator_headers,
+        )
+        assert refreshed_after_like.status_code == status.HTTP_200_OK
+        assert refreshed_after_like.json()["total_likes"] == first.json()["total_likes"] + 1
+        assert store.query_counts["list_creator_clips"] == 3
+
+        # Retention curve caches on repeat, then invalidates when new telemetry arrives
+        ret_1 = await client.get(
+            f"/api/v1/analytics/clips/{clip_public.id}/retention",
+            params={"period": "30d"},
+            headers=creator_headers,
+        )
+        assert ret_1.status_code == status.HTTP_200_OK
+        count_after_ret_1 = store.query_counts["clip_get_by_id"]
+
+        ret_2 = await client.get(
+            f"/api/v1/analytics/clips/{clip_public.id}/retention",
+            params={"period": "30d"},
+            headers=creator_headers,
+        )
+        assert ret_2.status_code == status.HTTP_200_OK
+        assert store.query_counts["clip_get_by_id"] == count_after_ret_1
+
+        tel_resp = await client.post(
+            f"/api/v1/clips/{clip_public.id}/telemetry",
+            json={
+                "session_token": str(uuid4()),
+                "watched_seconds": 25.0,
+                "max_progress_pct": 100,
+                "reached_buckets": [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+            },
+        )
+        assert tel_resp.status_code == status.HTTP_200_OK
+
+        ret_3 = await client.get(
+            f"/api/v1/analytics/clips/{clip_public.id}/retention",
+            params={"period": "30d"},
+            headers=creator_headers,
+        )
+        assert ret_3.status_code == status.HTTP_200_OK
+        assert ret_3.json()["total_sessions"] == 1
+        assert store.query_counts["clip_get_by_id"] > count_after_ret_1

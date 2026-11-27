@@ -100,7 +100,13 @@ class _FakeClipRepo:
     def __init__(self, store: _InMemoryClipStore, _session: AsyncSession) -> None:
         self._store = store
 
-    async def get_by_id(self, clip_id: UUID) -> Clip | None:
+    async def get_by_id(
+        self,
+        clip_id: UUID,
+        *,
+        load_relations: bool = True,
+    ) -> Clip | None:
+        _ = load_relations
         return self._store.clips.get(clip_id)
 
     async def get_by_slug(self, slug: str) -> Clip | None:
@@ -185,6 +191,13 @@ class _FakeClipRepo:
         _clip_ids: list[UUID],
     ) -> set[UUID]:
         return set()
+
+    async def get_user_interaction_clip_ids(
+        self,
+        _user_id: UUID,
+        _clip_ids: list[UUID],
+    ) -> tuple[set[UUID], set[UUID]]:
+        return set(), set()
 
     async def increment_views(self, clip_id: UUID, *, viewer_id: UUID | None = None) -> int:
         clip = self._store.clips[clip_id]

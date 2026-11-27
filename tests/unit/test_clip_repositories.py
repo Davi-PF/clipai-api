@@ -201,3 +201,40 @@ async def test_clip_repository_featured_most_viewed_period_and_view_recording() 
     session.execute.return_value = top_res
     assert await repo.get_top_highlight_clip_id(current_user_id=viewer_id, period="7d") == clip_id
     assert await repo.get_top_highlight_clip_id(current_user_id=None, period="all") == clip_id
+
+
+async def test_clip_repository_lightweight_lookup_and_union_interaction_query() -> None:
+    """Verify load_relations=False omits JOINs and interaction lookup uses a single UNION ALL."""
+    session = AsyncMock(spec=AsyncSession)
+    repo = ClipRepository(session)
+    user_id = uuid4()
+    clip_a = uuid4()
+    clip_b = uuid4()
+
+    # Empty clip list short-circuits without hitting DB
+    assert await repo.get_user_interaction_clip_ids(user_id, []) == (set(), set())
+    session.execute.assert_not_awaited()
+
+    # Single UNION ALL query separates likes and favorites accurately
+    union_res = MagicMock()
+    union_res.all.return_value = [(clip_a, "like"), (clip_a, "favorite"), (clip_b, "favorite")]
+    session.execute.return_value = union_res
+    liked, favorited = await repo.get_user_interaction_clip_ids(user_id, [clip_a, clip_b])
+    assert liked == {clip_a}
+    assert favorited == {clip_a, clip_b}
+    union_sql = str(session.execute.call_args[0][0].compile(dialect=postgresql.dialect()))
+    assert "UNION ALL" in union_sql
+
+    # load_relations=False runs a lean PK lookup without LEFT OUTER JOINs
+    pk_res = MagicMock()
+    pk_res.scalar_one_or_none.return_value = None
+    session.execute.return_value = pk_res
+    await repo.get_by_id(clip_a, load_relations=False)
+    lean_sql = str(session.execute.call_args[0][0].compile(dialect=postgresql.dialect()))
+    assert "LEFT OUTER JOIN" not in lean_sql
+
+    # load_relations=True eager-loads many-to-one author & game via LEFT OUTER JOIN
+    await repo.get_by_id(clip_a, load_relations=True)
+    joined_sql = str(session.execute.call_args[0][0].compile(dialect=postgresql.dialect()))
+    assert "LEFT OUTER JOIN users" in joined_sql
+    assert "LEFT OUTER JOIN games" in joined_sql
