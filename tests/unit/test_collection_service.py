@@ -296,6 +296,9 @@ async def test_collection_service_profile_showcase_and_private_collection_guards
 
     service._user_repo = AsyncMock()
     service._collection_repo = AsyncMock()
+    no_friend_res = MagicMock()
+    no_friend_res.scalar_one_or_none.return_value = None
+    session.execute.return_value = no_friend_res
 
     # Unknown user returns 404
     service._user_repo.get_by_username.return_value = None
