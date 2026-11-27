@@ -148,10 +148,11 @@ async def list_my_favorites(
 )
 async def get_public_user_profile(
     username: str,
+    current_user: User | None = Depends(get_optional_user),
     user_service: UserService = Depends(get_user_service),
 ) -> UserPublicResponse:
     """Return public user profile by username."""
-    return await user_service.get_public_profile(username)
+    return await user_service.get_public_profile(username, current_user=current_user)
 
 
 @router.get(
