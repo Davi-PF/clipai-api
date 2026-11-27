@@ -123,7 +123,13 @@ class _FakeClipRepo:
     def __init__(self, store: _InMemorySocialStore, _session: AsyncSession) -> None:
         self._store = store
 
-    async def get_by_id(self, clip_id: UUID) -> Clip | None:
+    async def get_by_id(
+        self,
+        clip_id: UUID,
+        *,
+        load_relations: bool = True,
+    ) -> Clip | None:
+        _ = load_relations
         return self._store.clips.get(clip_id)
 
     async def get_by_identifier(self, identifier: str) -> Clip | None:
@@ -180,6 +186,15 @@ class _FakeClipRepo:
 
     async def get_user_favorited_clip_ids(self, user_id: UUID, clip_ids: list[UUID]) -> set[UUID]:
         return {cid for cid in clip_ids if (user_id, cid) in self._store.favorites}
+
+    async def get_user_interaction_clip_ids(
+        self,
+        user_id: UUID,
+        clip_ids: list[UUID],
+    ) -> tuple[set[UUID], set[UUID]]:
+        liked = {cid for cid in clip_ids if (user_id, cid) in self._store.likes}
+        favorited = {cid for cid in clip_ids if (user_id, cid) in self._store.favorites}
+        return liked, favorited
 
     async def get_top_highlight_clip_id(
         self,

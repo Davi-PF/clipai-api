@@ -268,8 +268,7 @@ async def test_collection_detail_restricts_clip_technical_metadata_to_clip_owner
     service._clip_repo = AsyncMock()
     service._collection_repo.get_by_id.return_value = public_coll
     service._collection_repo.list_collection_clips.return_value = (links, 2)
-    service._clip_repo.get_user_liked_clip_ids.return_value = set()
-    service._clip_repo.get_user_favorited_clip_ids.return_value = set()
+    service._clip_repo.get_user_interaction_clip_ids.return_value = (set(), set())
 
     owner_view = await service.get_collection_detail(public_coll.id, current_user=owner)
     assert owner_view.clips[0].clip.file_size_bytes == 2_000_000

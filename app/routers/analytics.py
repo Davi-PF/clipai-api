@@ -5,6 +5,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import Settings, get_settings
 from app.core.database import get_db
 from app.core.dependencies import get_current_user
 from app.models.user import User
@@ -26,10 +27,15 @@ router = APIRouter(prefix="/analytics", tags=["Analytics"])
 
 def get_analytics_service(
     session: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
     storage_service: StorageService = Depends(get_storage_service),
 ) -> AnalyticsService:
     """Provide AnalyticsService dependency."""
-    return AnalyticsService(session=session, storage_service=storage_service)
+    return AnalyticsService(
+        session=session,
+        storage_service=storage_service,
+        cache_ttl_seconds=settings.analytics_cache_ttl_seconds,
+    )
 
 
 @router.get(

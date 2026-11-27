@@ -228,6 +228,7 @@ async def test_privacy_and_ownership_guards_on_detail_list_update_delete(
 
     friends_clip = _make_clip(owner, status="ready", privacy="friends")
     service._clip_repo.get_by_identifier.return_value = friends_clip
+    service._clip_repo.get_user_interaction_clip_ids.return_value = (set(), set())
     with pytest.raises(AppError) as anon_friends:
         await service.get_clip_detail(friends_clip.slug, None)
     assert anon_friends.value.status_code == 401
@@ -322,8 +323,7 @@ async def test_list_clips_forwards_period_and_marks_only_top_highlight(
 
     service._clip_repo = AsyncMock()
     service._clip_repo.list_clips.return_value = ([top_clip, second_clip], 2)
-    service._clip_repo.get_user_liked_clip_ids.return_value = set()
-    service._clip_repo.get_user_favorited_clip_ids.return_value = set()
+    service._clip_repo.get_user_interaction_clip_ids.return_value = (set(), set())
     service._clip_repo.get_top_highlight_clip_id.return_value = top_clip.id
 
     res = await service.list_clips(sort="featured", period="7d", page=1, page_size=4)
@@ -373,8 +373,7 @@ async def test_technical_metadata_and_file_size_restricted_to_owner(
     service._clip_repo = AsyncMock()
     service._clip_repo.get_by_identifier.return_value = clip
     service._clip_repo.list_clips.return_value = ([clip], 1)
-    service._clip_repo.get_user_liked_clip_ids.return_value = set()
-    service._clip_repo.get_user_favorited_clip_ids.return_value = set()
+    service._clip_repo.get_user_interaction_clip_ids.return_value = (set(), set())
     service._clip_repo.get_top_highlight_clip_id.return_value = None
 
     owner_detail = await service.get_clip_detail(clip.slug, owner)

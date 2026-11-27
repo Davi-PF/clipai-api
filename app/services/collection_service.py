@@ -192,15 +192,10 @@ class CollectionService:
         )
 
         clip_ids = [link.clip_id for link in links]
-        liked_ids = (
-            await self._clip_repo.get_user_liked_clip_ids(current_user.id, clip_ids)
+        liked_ids, favorited_ids = (
+            await self._clip_repo.get_user_interaction_clip_ids(current_user.id, clip_ids)
             if current_user and clip_ids
-            else set()
-        )
-        favorited_ids = (
-            await self._clip_repo.get_user_favorited_clip_ids(current_user.id, clip_ids)
-            if current_user and clip_ids
-            else set()
+            else (set(), set())
         )
 
         clip_items = [
@@ -284,7 +279,7 @@ class CollectionService:
     ) -> CollectionAddClipResponse:
         """Idempotently add a ready clip to an owned collection."""
         collection = await self._get_owned_collection(collection_id, current_user)
-        clip = await self._clip_repo.get_by_id(payload.clip_id)
+        clip = await self._clip_repo.get_by_id(payload.clip_id, load_relations=False)
         if clip is None:
             raise AppError(
                 status_code=status.HTTP_404_NOT_FOUND,

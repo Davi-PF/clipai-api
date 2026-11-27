@@ -181,3 +181,16 @@ async def test_collection_repository_crud_previews_and_membership() -> None:
     await repo.remove_clip(collection_id=coll.id, clip_id=clip_id)
     await repo.delete(coll)
     session.delete.assert_awaited_once_with(coll)
+
+    # Zero-total short-circuits skip the second SELECT query
+    zero_count = MagicMock()
+    zero_count.scalar_one.return_value = 0
+    session.execute.reset_mock()
+    session.execute.side_effect = [zero_count, zero_count, zero_count]
+    assert await repo.list_collections(current_user_id=None) == ([], 0)
+    assert await repo.list_profile_collections(
+        owner_id=user_id,
+        allowed_privacies=("public",),
+    ) == ([], 0)
+    assert await repo.list_collection_clips(coll.id, current_user_id=None) == ([], 0)
+    assert session.execute.await_count == 3

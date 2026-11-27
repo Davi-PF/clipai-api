@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 from fastapi import status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.cache import UserScopedTTLCache, analytics_cache
 from app.core.config import Settings
 from app.core.exceptions import AppError
 from app.core.privacy import are_friends, ensure_clip_viewable, ensure_collection_viewable
@@ -47,10 +48,13 @@ class ClipService:
         session: AsyncSession,
         settings: Settings,
         storage_service: StorageService,
+        *,
+        cache: UserScopedTTLCache | None = None,
     ) -> None:
         self._session = session
         self._settings = settings
         self._storage = storage_service
+        self._cache = cache or analytics_cache
         self._game_repo = GameRepository(session)
         self._tag_repo = TagRepository(session)
         self._clip_repo = ClipRepository(session)
@@ -199,12 +203,13 @@ class ClipService:
         clip.file_size_bytes = video_meta.content_length
         clip.status = "ready"
         await self._session.commit()
+        self._cache.invalidate_user(current_user.id)
         refreshed = await self._clip_repo.get_by_id(clip.id)
         return self._to_detail_response(refreshed or clip, current_user=current_user)
 
     async def cancel_upload(self, clip_id: UUID, current_user: User) -> None:
         """Cancel an unconfirmed upload, deleting the DB row and any R2 objects."""
-        clip = await self._get_owned_clip(clip_id, current_user)
+        clip = await self._get_owned_clip(clip_id, current_user, load_relations=False)
         if clip.status == "ready":
             raise AppError(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -321,6 +326,7 @@ class ClipService:
         clip = await self._get_readable_ready_clip(clip_id, current_user)
         likes_count = await self._clip_repo.like_clip(user_id=current_user.id, clip_id=clip.id)
         await self._session.commit()
+        self._cache.invalidate_user(clip.user_id)
         return ClipLikeResponse(
             clip_id=clip.id,
             liked=True,
@@ -333,6 +339,7 @@ class ClipService:
         clip = await self._get_readable_ready_clip(clip_id, current_user)
         likes_count = await self._clip_repo.unlike_clip(user_id=current_user.id, clip_id=clip.id)
         await self._session.commit()
+        self._cache.invalidate_user(clip.user_id)
         return ClipLikeResponse(
             clip_id=clip.id,
             liked=False,
@@ -348,6 +355,7 @@ class ClipService:
             clip_id=clip.id,
         )
         await self._session.commit()
+        self._cache.invalidate_user(clip.user_id)
         return ClipFavoriteResponse(
             clip_id=clip.id,
             favorited=True,
@@ -363,6 +371,7 @@ class ClipService:
             clip_id=clip.id,
         )
         await self._session.commit()
+        self._cache.invalidate_user(clip.user_id)
         return ClipFavoriteResponse(
             clip_id=clip.id,
             favorited=False,
@@ -382,6 +391,7 @@ class ClipService:
             viewer_id=current_user.id if current_user else None,
         )
         await self._session.commit()
+        self._cache.invalidate_user(clip.user_id)
         return ClipViewResponse(clip_id=clip.id, views_count=views_count)
 
     async def update_clip(
@@ -408,13 +418,15 @@ class ClipService:
             await self._clip_repo.replace_tags(clip, tags)
 
         await self._session.commit()
+        self._cache.invalidate_user(current_user.id)
         refreshed = await self._clip_repo.get_by_id(clip.id)
         return self._to_detail_response(refreshed or clip, current_user=current_user)
 
     async def delete_clip(self, clip_id: UUID, current_user: User) -> None:
         """Delete clip from PostgreSQL and remove media objects from Cloudflare R2."""
-        clip = await self._get_owned_clip(clip_id, current_user)
+        clip = await self._get_owned_clip(clip_id, current_user, load_relations=False)
         await self._delete_clip_and_objects(clip)
+        self._cache.invalidate_user(clip.user_id)
 
     async def _delete_clip_and_objects(self, clip: Clip) -> None:
         """Remove a clip record from PostgreSQL and delete its R2 objects."""
@@ -493,9 +505,15 @@ class ClipService:
                 return candidate
         return secrets.token_urlsafe(10)
 
-    async def _get_owned_clip(self, clip_id: UUID, current_user: User) -> Clip:
+    async def _get_owned_clip(
+        self,
+        clip_id: UUID,
+        current_user: User,
+        *,
+        load_relations: bool = True,
+    ) -> Clip:
         """Fetch clip by UUID and enforce ownership."""
-        clip = await self._clip_repo.get_by_id(clip_id)
+        clip = await self._clip_repo.get_by_id(clip_id, load_relations=load_relations)
         if clip is None:
             raise self._clip_not_found_error()
         if clip.user_id != current_user.id:
@@ -535,8 +553,8 @@ class ClipService:
         clip_id: UUID,
         current_user: User | None,
     ) -> Clip:
-        """Fetch ready clip by UUID and verify privacy access."""
-        clip = await self._clip_repo.get_by_id(clip_id)
+        """Fetch ready clip by UUID without relation joins and verify privacy access."""
+        clip = await self._clip_repo.get_by_id(clip_id, load_relations=False)
         if clip is None or clip.status != "ready":
             raise self._clip_not_found_error()
         is_owner = current_user is not None and clip.user_id == current_user.id
@@ -578,16 +596,11 @@ class ClipService:
         clips: list[Clip],
         current_user: User | None,
     ) -> tuple[set[UUID], set[UUID]]:
-        """Batch-load liked and favorited clip ID sets for an authenticated user."""
+        """Batch-load liked and favorited clip ID sets in a single UNION ALL SQL query."""
         if current_user is None or not clips:
             return set(), set()
         clip_ids = [clip.id for clip in clips]
-        liked_ids = await self._clip_repo.get_user_liked_clip_ids(current_user.id, clip_ids)
-        favorited_ids = await self._clip_repo.get_user_favorited_clip_ids(
-            current_user.id,
-            clip_ids,
-        )
-        return liked_ids, favorited_ids
+        return await self._clip_repo.get_user_interaction_clip_ids(current_user.id, clip_ids)
 
     def _to_summary_response(
         self,
