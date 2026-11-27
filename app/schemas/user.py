@@ -18,6 +18,8 @@ from app.core.config import get_settings
 from app.core.privacy import CollectionsVisibility
 
 AvatarSource = Literal["custom", "discord", "none"]
+FriendshipStatus = Literal["self", "none", "pending_sent", "pending_received", "accepted"]
+SearchFriendshipStatus = Literal["none", "pending_sent", "pending_received", "accepted"]
 
 
 def _get_field(source: Any, name: str, default: Any = None) -> Any:
@@ -315,9 +317,26 @@ class UserPublicResponse(BaseModel):
     discord_linked: bool = False
     discord_username: str | None = None
     collections_visibility: CollectionsVisibility = "public"
+    friendship_status: FriendshipStatus = "none"
+    friendship_id: UUID | None = None
     stats: UserPublicStats = Field(default_factory=UserPublicStats)
     clips_count: int = 0
     total_views: int = 0
     total_likes: int = 0
     collections_count: int = 0
     created_at: datetime
+
+
+class UserSearchItemResponse(BaseModel):
+    """User summary with friendship state returned by GET /api/v1/users/search."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    username: str
+    display_name: str
+    avatar_url: str | None = None
+    discord_linked: bool = False
+    discord_username: str | None = None
+    friendship_status: SearchFriendshipStatus = "none"
+    friendship_id: UUID | None = None

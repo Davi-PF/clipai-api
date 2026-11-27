@@ -18,6 +18,7 @@ from app.core.security import create_access_token
 from app.main import create_app
 from app.models.clip import Clip
 from app.models.collection import Collection, CollectionClip
+from app.models.friendship import Friendship
 from app.models.game import Game
 from app.models.user import User
 from app.routers.clips import get_storage_service as get_clips_storage_service
@@ -34,6 +35,32 @@ class _InMemorySocialStore:
         self.favorites: set[tuple[UUID, UUID]] = set()
         self.collections: dict[UUID, Collection] = {}
         self.collection_clips: dict[tuple[UUID, UUID], CollectionClip] = {}
+        self.friendships: dict[UUID, Friendship] = {}
+
+
+class _FakeFriendshipRepo:
+    def __init__(self, store: _InMemorySocialStore, _session: AsyncSession) -> None:
+        self._store = store
+
+    async def get_between_users(
+        self,
+        user_a_id: UUID,
+        user_b_id: UUID,
+    ) -> Friendship | None:
+        return next(
+            (
+                f
+                for f in self._store.friendships.values()
+                if {f.requester_id, f.addressee_id} == {user_a_id, user_b_id}
+            ),
+            None,
+        )
+
+    async def are_friends(self, user_a_id: UUID, user_b_id: UUID) -> bool:
+        if user_a_id == user_b_id:
+            return False
+        friendship = await self.get_between_users(user_a_id, user_b_id)
+        return friendship is not None and friendship.status == "accepted"
 
 
 class _FakeUserRepo:
@@ -498,6 +525,10 @@ def social_test_env(
     monkeypatch.setattr("app.core.dependencies.UserRepository", lambda s: _FakeUserRepo(store, s))
     monkeypatch.setattr(
         "app.services.user_service.UserRepository", lambda s: _FakeUserRepo(store, s)
+    )
+    monkeypatch.setattr(
+        "app.services.user_service.FriendshipRepository",
+        lambda s: _FakeFriendshipRepo(store, s),
     )
     monkeypatch.setattr(
         "app.services.collection_service.UserRepository", lambda s: _FakeUserRepo(store, s)
